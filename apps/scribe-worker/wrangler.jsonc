@@ -1,0 +1,29 @@
+// Cloudflare practicalities: plan §5. Secrets (ANTHROPIC_API_KEY, later the
+// KMS bearer / configured grant / coordinator token) come from .dev.vars
+// locally and `wrangler secret put` in prod — never from this file.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "thinker-scribe",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-01-28",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // No [ai] binding in M0: getModel() talks to Anthropic directly over HTTPS.
+  // Re-add {"ai": {"binding": "AI"}} to use Think's string-model-id path
+  // (Workers AI / AI Gateway) — note `wrangler dev` then needs a Cloudflare
+  // login/API token for the remote AI proxy.
+  "durable_objects": {
+    "bindings": [{ "name": "Scribe", "class_name": "Scribe" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Scribe"] }],
+
+  "observability": {
+    "enabled": true,
+    "traces": { "enabled": true }
+  },
+
+  "vars": {
+    // Model override for getModel(); default is claude-sonnet-5 (plan §11 O2).
+    // "MODEL_ID": "claude-opus-4-8"
+  }
+}

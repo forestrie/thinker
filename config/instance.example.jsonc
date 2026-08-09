@@ -1,0 +1,24 @@
+// Pre-provisioned Forestrie wiring for the Scribe (see plan §6, §7).
+// Produced by scripts/provision.sh (M2) — copy to instance.jsonc (gitignored).
+// The agent is configured with an instance; it never creates one (D6).
+{
+  // Univocity instance identity (T1)
+  "chainId": "<chain id>",
+  "contract": "<instance contract address>",
+
+  // Forest / root log id — child logs register on the root path (T2)
+  "R": "<forest genesis log id>",
+
+  // Trust root: genesis.cbor cached locally for offline verification (T3)
+  "genesis": "./genesis.cbor",
+
+  // canopy public API endpoints (D5 — reached as a client, no service binding)
+  "forestrieBaseUrl": "https://<lane>.example/",
+  "logStoreUrl": "https://<public R2 tiles>/",
+
+  // Pre-issued grant(s), base64 COSE_Sign1 (T4). Secrets go in .dev.vars /
+  // wrangler secret, NOT here — this file carries only non-secret wiring.
+  "grants": {
+    "agent": "<set via GRANT_AGENT secret>"
+  }
+}

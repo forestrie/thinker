@@ -1,0 +1,23 @@
+{
+  "name": "@forestrie/think-scribe",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Reusable Cloudflare Think extension: a Scribe agent that commits attested work statements to a Forestrie transparency log",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^4.0.36",
+    "@cloudflare/think": "^0.15.1",
+    "agents": "^0.20.1",
+    "ai": "^7.0.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250801.0",
+    "typescript": "^5.7.0"
+  }
+}

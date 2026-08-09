@@ -1,0 +1,20 @@
+{
+  "name": "thinker",
+  "private": true,
+  "description": "Forestrie \u00d7 Cloudflare Think demo \u2014 the Scribe: a per-user Think agent producing a tamper-evident, externally verifiable record of a conversation",
+  "scripts": {
+    "dev": "pnpm --filter scribe-worker dev",
+    "typecheck": "pnpm -r typecheck",
+    "deploy": "pnpm --filter scribe-worker deploy"
+  },
+  "packageManager": "pnpm@10.6.5",
+  "engines": {
+    "node": ">=22"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "workerd",
+      "esbuild"
+    ]
+  }
+}
