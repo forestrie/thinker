@@ -6,3 +6,6 @@ config/instance.jsonc
 *.log
 worker-configuration.d.ts
 .DS_Store
+.provision/
+config/genesis.cbor
+**/test/.out/

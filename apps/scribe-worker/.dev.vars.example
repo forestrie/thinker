@@ -6,3 +6,11 @@ SESSION_HMAC_SECRET=change-me-openssl-rand-base64-32
 SCRIBE_KEK=change-me-openssl-rand-base64-32
 # "1" accepts `dev:<sub>` bearer tokens without a wallet signature. Dev only.
 DEV_AUTH=1
+# Forestrie write path (M2) — values from `scripts/provision.sh config`:
+# forestrieBaseUrl, R, and the agent grant from .provision/agent-grant.b64.
+FORESTRIE_BASE_URL=https://<lane-scrapi-origin>
+FORESTRIE_ROOT_LOG_ID=<forest-root-log-id>
+GRANT_AGENT=<base64 completed grant transparent statement>
+# Sealing delegation for the agent-owned data log (T9):
+DELEGATION_COORDINATOR_URL=https://<lane-coordinator-origin>
+KNOWN_SEALER_KEY=<base64 registrar voucher key x||y>

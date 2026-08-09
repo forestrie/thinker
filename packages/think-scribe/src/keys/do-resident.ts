@@ -127,6 +127,21 @@ export class DoResidentKeyProvider implements KeyProvider {
     return new Uint8Array(sig); // 64-byte P1363 r‖s
   }
 
+  async signingKeyPair(): Promise<CryptoKeyPair> {
+    // Rebuild the public handle from x‖y (uncompressed SEC1 point).
+    const point = new Uint8Array(65);
+    point[0] = 0x04;
+    point.set(this.xy, 1);
+    const publicKey = await crypto.subtle.importKey(
+      "raw",
+      point as BufferSource,
+      EC_ALG,
+      true,
+      ["verify"],
+    );
+    return { privateKey: this.privateKey, publicKey };
+  }
+
   async rotate(epoch: number): Promise<void> {
     if (epoch <= this.currentEpoch)
       throw new Error(

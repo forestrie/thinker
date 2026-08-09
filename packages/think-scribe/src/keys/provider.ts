@@ -27,6 +27,15 @@ export interface KeyProvider {
    * re-issue the grant naming it; keep the N−1 key available for overlap.
    */
   rotate(epoch: number): Promise<void>;
+
+  /**
+   * The current key as a WebCrypto pair (private non-extractable, sign-only)
+   * for flows that sign through library code rather than `sign()` — the
+   * sealing-delegation certificate (`@forestrie/delegation-cose`) is the
+   * consumer. Optional: custody backends that cannot hand out a handle
+   * (remote KMS signing) simply don't offer delegation from the agent.
+   */
+  signingKeyPair?(): Promise<CryptoKeyPair>;
 }
 
 export function bytesToHex(bytes: Uint8Array): string {
