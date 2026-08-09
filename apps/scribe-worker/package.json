@@ -11,6 +11,8 @@
   },
   "dependencies": {
     "@forestrie/think-scribe": "workspace:*",
+    "@noble/curves": "^2.3.0",
+    "@noble/hashes": "^2.3.0",
     "agents": "^0.20.1"
   },
   "devDependencies": {

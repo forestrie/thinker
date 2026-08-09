@@ -1,3 +1,8 @@
-# Copy to .dev.vars (gitignored) for `wrangler dev`.
+# Copy to .dev.vars (gitignored) and fill in. Prod: `wrangler secret put`.
 ANTHROPIC_API_KEY=sk-ant-...
-# MODEL_ID=claude-opus-4-8
+# HMAC key for wcc-1 challenge + session tokens (any high-entropy string).
+SESSION_HMAC_SECRET=change-me-openssl-rand-base64-32
+# Base64 32-byte AES-GCM KEK wrapping the DO-resident agent signing key (C2).
+SCRIBE_KEK=change-me-openssl-rand-base64-32
+# "1" accepts `dev:<sub>` bearer tokens without a wallet signature. Dev only.
+DEV_AUTH=1
