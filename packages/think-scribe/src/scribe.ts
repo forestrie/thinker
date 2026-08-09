@@ -74,15 +74,28 @@ const GRANT_B64_KEY = "forestrie:grantB64";
 const DELEGATION_EXPIRES_KEY = "forestrie:delegationExpiresAt";
 /** Renew the sealing lease when it has less runway than this (seconds). */
 const DELEGATION_RENEW_MARGIN_S = 600;
+/** Receipt collection cadence (T7→T8). Sequencing is seconds; sealing is
+ * minutes-latent (T9) — poll gently from a scheduled task, never inline. */
+const RECEIPT_POLL_S = 10;
+/** Give up on a work unit's receipt after this many polls (~20 min). */
+const MAX_RECEIPT_POLLS = 120;
+const COLLECT_CALLBACK = "collectReceipts";
 
 /**
  * A work unit's lifecycle record (plan §7): admitted → turn completed and
- * commitment queued → statement registered (receipt collection is M4).
+ * commitment queued → statement registered → sequenced → receipt collected
+ * (M4, T7→T8).
  */
 interface WorkRecord {
   workId: string;
   envelopeB64: string;
-  state: "submitted" | "queued" | "registered" | "error";
+  state:
+    | "submitted"
+    | "queued"
+    | "registered"
+    | "sequenced"
+    | "receipted"
+    | "error";
   submittedAt: number;
   /** Present from "queued": the assembled per-turn commitment. */
   steps?: CommittedStep[];
@@ -94,6 +107,14 @@ interface WorkRecord {
   statusUrl?: string;
   /** Registered statement bytes (base64) — the verify artifact. */
   statementB64?: string;
+  /** Present from "sequenced". */
+  entryId?: string;
+  receiptUrl?: string;
+  /** Present from "receipted": the sealed COSE receipt (base64). */
+  receiptB64?: string;
+  receiptedAt?: number;
+  /** Scheduled-collection bookkeeping. */
+  pollAttempts?: number;
   error?: string;
 }
 
@@ -350,6 +371,7 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
   async drainCommitments(): Promise<void> {
     await this.#renewDelegationIfNeeded();
     const works = await this.ctx.storage.list<WorkRecord>({ prefix: "work:" });
+    let registered = false;
     for (const record of works.values()) {
       if (record.state !== "queued") continue;
       try {
@@ -372,12 +394,77 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
         for (const b of statement) b64 += String.fromCharCode(b);
         record.statementB64 = btoa(b64);
         record.state = "registered";
+        registered = true;
       } catch (err) {
         record.error = String(err);
         record.state = "error";
       }
       await this.ctx.storage.put(workKey(record.workId), record);
     }
+    if (registered) await this.#ensureReceiptCollection(2);
+  }
+
+  /**
+   * Scheduled receipt collection (M4, T7→T8): advance every in-flight work
+   * unit one step — status poll until sequenced, then receipt fetch until
+   * the covering checkpoint seals — and reschedule while any remain. Runs
+   * only from the schedule alarm; the chat path never waits on the lane.
+   */
+  async collectReceipts(): Promise<void> {
+    const works = await this.ctx.storage.list<WorkRecord>({ prefix: "work:" });
+    let pending = false;
+    for (const record of works.values()) {
+      if (record.state !== "registered" && record.state !== "sequenced") continue;
+      record.pollAttempts = (record.pollAttempts ?? 0) + 1;
+      if (record.pollAttempts > MAX_RECEIPT_POLLS) {
+        record.error = `receipt collection gave up after ${MAX_RECEIPT_POLLS} polls`;
+        record.state = "error";
+        await this.ctx.storage.put(workKey(record.workId), record);
+        continue;
+      }
+      try {
+        if (record.state === "registered" && record.statusUrl) {
+          const status = await queryRegistration(record.statusUrl);
+          if (status.state === "sequenced") {
+            record.entryId = status.entryId;
+            record.receiptUrl = status.receiptUrl;
+            record.state = "sequenced";
+          }
+        }
+        if (record.state === "sequenced" && record.receiptUrl) {
+          const receipt = await fetchReceipt(record.receiptUrl);
+          if (receipt.state === "ready") {
+            let b64 = "";
+            for (const b of receipt.receipt) b64 += String.fromCharCode(b);
+            record.receiptB64 = btoa(b64);
+            record.receiptedAt = Date.now();
+            record.state = "receipted";
+          }
+        }
+      } catch (err) {
+        // Transient lane errors: keep the record in flight; the attempt cap
+        // bounds how long we retry.
+        console.warn(`receipt poll failed for ${record.workId}`, err);
+      }
+      if (record.state === "registered" || record.state === "sequenced")
+        pending = true;
+      await this.ctx.storage.put(workKey(record.workId), record);
+    }
+    if (pending) await this.#ensureReceiptCollection(RECEIPT_POLL_S);
+  }
+
+  /**
+   * Schedule the collector unless a FUTURE run is already booked. The dedupe
+   * must ignore past-due rows: the SDK deletes a one-shot schedule row only
+   * AFTER its callback completes, so during collectReceipts its own row is
+   * still listed — matching on it would stall the chain.
+   */
+  async #ensureReceiptCollection(delaySeconds: number): Promise<void> {
+    const now = Date.now() / 1000;
+    const schedules = await this.listSchedules();
+    if (schedules.some((s) => s.callback === COLLECT_CALLBACK && s.time > now))
+      return;
+    await this.schedule(delaySeconds, COLLECT_CALLBACK, {});
   }
 
   /** Delegate-at-drain: re-lease sealing when under the renewal margin. */
@@ -400,6 +487,30 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
       // Sequencing still works without the lease; receipts just lag. The
       // next drain retries.
       console.warn("delegation renewal failed", err);
+    }
+  }
+
+  /**
+   * The DO's current claim of the assistant's output for a turn's leaf,
+   * straight from Think's session store. Must mirror how onChatResponse
+   * derived outputHash (join of the message's text parts) so an untampered
+   * record round-trips to the committed hash exactly.
+   */
+  #currentOutputText(leafId: string): string | null {
+    try {
+      const rows = this.sql<{ content: string }>`
+        SELECT content FROM assistant_messages WHERE id = ${leafId}
+      `;
+      if (!rows.length) return null;
+      const message = JSON.parse(rows[0]!.content) as {
+        parts?: Array<{ type: string; text?: string }>;
+      };
+      return (message.parts ?? [])
+        .filter((p) => p.type === "text" && typeof p.text === "string")
+        .map((p) => p.text)
+        .join("");
+    } catch {
+      return null;
     }
   }
 
@@ -514,6 +625,47 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
       await this.ctx.storage.put(GRANT_B64_KEY, body.grantB64);
       await this.ctx.storage.put(AGENT_LOG_ID_KEY, body.agentLogId);
       return Response.json({ principal, configured: true });
+    }
+
+    // Receipt export (M4): every work unit with its verify artifacts, plus
+    // what this DO CURRENTLY claims the assistant said for each leaf — read
+    // live from the session store, so verification catches any divergence
+    // between the DO's memory and the receipted commitment (the tamper beat).
+    if (request.method === "GET" && url.pathname.endsWith("/receipts")) {
+      const keys = await this.keys();
+      const works = await this.ctx.storage.list<WorkRecord>({ prefix: "work:" });
+      const exported = [...works.values()]
+        .sort((a, b) => a.submittedAt - b.submittedAt)
+        .map((record) => ({
+          workId: record.workId,
+          state: record.state,
+          submittedAt: record.submittedAt,
+          envelopeB64: record.envelopeB64,
+          statementB64: record.statementB64,
+          contentHash: record.contentHash,
+          entryId: record.entryId,
+          receiptB64: record.receiptB64,
+          receiptedAt: record.receiptedAt,
+          leafId: record.leafId,
+          error: record.error,
+          currentOutputText: record.leafId
+            ? this.#currentOutputText(record.leafId)
+            : null,
+        }));
+      return Response.json({
+        principal,
+        identity: {
+          kid: bytesToHex(keys.kid()),
+          publicKeyXY: bytesToHex(await keys.publicKeyXY()),
+        },
+        works: exported,
+      });
+    }
+
+    // Manual collection kick (harness/demo): book an immediate poll.
+    if (request.method === "POST" && url.pathname.endsWith("/collect-receipts")) {
+      await this.#ensureReceiptCollection(1);
+      return Response.json({ principal, scheduled: true });
     }
 
     // Work-unit lifecycle inspection (harness + later the client UI).

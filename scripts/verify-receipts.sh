@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# verify-receipts.sh — offline receipt verification (Auditor stand-in) against
-# the cached genesis trust root, via @forestrie/receipt-verify. Verifies
-# inclusion with the log absent — the demo's payoff (plan §2, T8).
-#
-# M4 work item — not implemented in the M0 scaffold.
+# verify-receipts.sh — offline receipt verification (Auditor stand-in) via
+# @forestrie/receipt-verify under a known log key. Verifies inclusion with the
+# log absent — the demo's payoff (plan §2, T8). See verify-receipts.mjs for
+# the checks and options; this wrapper exists so the plan's named entry point
+# works from anywhere.
 set -euo pipefail
-echo "verify-receipts.sh: not implemented until M4 (see plan §9)." >&2
-exit 1
+exec node "$(dirname "$0")/verify-receipts.mjs" "$@"

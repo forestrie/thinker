@@ -15,7 +15,7 @@ registrant/writer against canopy's public APIs, never a sealer.
 packages/think-scribe/   @forestrie/think-scribe — the reusable Think extension
 apps/scribe-worker/      thin Worker hosting the Scribe Durable Object
 config/                  pre-provisioned instance wiring (see instance.example.jsonc)
-scripts/                 provision.sh (M2), verify-receipts.sh (M4)
+scripts/                 provision.sh (M2), verify-receipts.sh + tamper.sh (M4)
 ```
 
 ## Development
@@ -53,13 +53,45 @@ non-extractable handle at load. With `DEV_AUTH=1`, `Bearer dev:<name>` skips
 the wallet flow locally. Smoke test: `node test/m1-smoke.mjs` against
 `pnpm dev`.
 
+## Receipts & the tamper beat (M4)
+
+After a turn's work statement registers, the Scribe's own **scheduled task**
+follows sequencing and collects the sealed receipt (T7→T8) — nothing in the
+chat path ever waits on the lane. `GET …/receipts` exports every work unit
+with its verify artifacts plus the DO's *currently claimed* transcript for
+each turn, and `scripts/verify-receipts.sh` verifies it all **offline** (the
+log absent, trust root = the agent's public key):
+
+```sh
+scripts/verify-receipts.sh --url http://localhost:8787/agents/scribe/user-<sub> \
+                           --token <bearer>          # or --export receipts.json
+```
+
+Checks per work unit: the user's KS256 envelope signature, the agent's ES256
+statement signature, the receipt (inclusion proof + sealed checkpoint +
+delegation cert via `@forestrie/receipt-verify`), `workId = H(envelope)`
+binding, and **transcript-binding** — the DO's claimed output hashes to what
+the receipt committed. That last one is the demo beat:
+
+```sh
+# 1. chat, wait for state=receipted, verify → all pass
+# 2. stop wrangler dev, rewrite the DO's memory of what the agent said:
+scripts/tamper.sh --leaf <leafId> "what it said" "what you wish it said"
+# 3. restart wrangler dev, re-verify:
+scripts/verify-receipts.sh …   # ✘ transcript-binding — the record was tampered
+```
+
+Smoke test: `node test/m4-smoke.mjs` against `pnpm dev` (runs a real attested
+turn, waits for DO-driven collection, verifies, and proves divergence on a
+tampered export).
+
 ## Milestones
 
 - **M0** (this scaffold): workspace + bare Scribe Think DO streaming chat.
 - **M1** (done): per-user routing (Option B), wcc-1 edge auth, DO-resident
   agent key (C2) behind the `KeyProvider` custody seam.
-- **M2**: Forestrie write path — COSE Sign1 statements registered under a grant.
-- **M3**: Tier-2 attestation — user-signed input envelope embedded in the agent's
-  per-turn work statement.
-- **M4**: deferred receipt collection + offline verification; the tamper beat.
+- **M2** (done): Forestrie write path — COSE Sign1 statements registered under a grant.
+- **M3** (done): Tier-2 attestation — user-signed input envelope embedded in the
+  agent's per-turn work statement.
+- **M4** (done): scheduled receipt collection + offline verification; the tamper beat.
 - **M5**: KMS-seed key custody (C3), pre-issued grants, separate user-endorsed leaf.
