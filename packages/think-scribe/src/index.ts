@@ -24,3 +24,19 @@ export {
   type DelegateSealingParams,
   type DelegateSealingResult,
 } from "./forestrie/delegate.ts";
+export {
+  buildUserEnvelope,
+  verifyUserEnvelope,
+  EnvelopeError,
+  COSE_ALG_KS256,
+  type EnvelopeClaims,
+  type VerifiedEnvelope,
+} from "./forestrie/envelope.ts";
+export {
+  buildWorkStatementPayload,
+  sha256Hex,
+  WORK_STATEMENT_TYPE,
+  type CommittedStep,
+  type WorkStatementInput,
+} from "./attestation.ts";
+export { cborEncode, cborDecode, type CborValue, type CborMap } from "./forestrie/cbor.ts";

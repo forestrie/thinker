@@ -12,6 +12,12 @@ import {
   ScrapiError,
 } from "./forestrie/register.ts";
 import { DelegateError, delegateSealing } from "./forestrie/delegate.ts";
+import { EnvelopeError, verifyUserEnvelope } from "./forestrie/envelope.ts";
+import {
+  buildWorkStatementPayload,
+  sha256Hex,
+  type CommittedStep,
+} from "./attestation.ts";
 
 /**
  * Bindings the Scribe needs from its hosting Worker. The app's generated
@@ -61,6 +67,35 @@ export const DEFAULT_MODEL_ID = "claude-sonnet-5";
 export const PRINCIPAL_HEADER = "x-scribe-principal";
 
 const PRINCIPAL_STORAGE_KEY = "scribe:principal";
+const workKey = (workId: string) => `work:${workId}`;
+const STEP_BUFFER_KEY = "turn:steps";
+const AGENT_LOG_ID_KEY = "forestrie:agentLogId";
+const GRANT_B64_KEY = "forestrie:grantB64";
+const DELEGATION_EXPIRES_KEY = "forestrie:delegationExpiresAt";
+/** Renew the sealing lease when it has less runway than this (seconds). */
+const DELEGATION_RENEW_MARGIN_S = 600;
+
+/**
+ * A work unit's lifecycle record (plan §7): admitted → turn completed and
+ * commitment queued → statement registered (receipt collection is M4).
+ */
+interface WorkRecord {
+  workId: string;
+  envelopeB64: string;
+  state: "submitted" | "queued" | "registered" | "error";
+  submittedAt: number;
+  /** Present from "queued": the assembled per-turn commitment. */
+  steps?: CommittedStep[];
+  outputHash?: string;
+  leafId?: string;
+  requestId?: string;
+  /** Present from "registered". */
+  contentHash?: string;
+  statusUrl?: string;
+  /** Registered statement bytes (base64) — the verify artifact. */
+  statementB64?: string;
+  error?: string;
+}
 
 function decodeBase64(value: string): Uint8Array {
   const bin = atob(value);
@@ -122,13 +157,19 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
   }
 
   /**
-   * The agent's writer credential (grant seam, plan T4). Cut 1: configured
-   * from the environment; `GrantProvider.request` variants come later (§9-C).
+   * The agent's writer credential (grant seam, plan T4). Per-instance: the
+   * grant is bound to THIS DO's kid, so it lives in DO storage (set via
+   * `/configure-forestrie` for now; request-grant-at-init will store it the
+   * same way in M5). Env `GRANT_AGENT` is a single-user dev fallback.
    */
-  grants(): GrantProvider {
-    if (!this.env.GRANT_AGENT)
-      throw new ForestrieUnconfigured("GRANT_AGENT not set");
-    return new ConfiguredGrantProvider(this.env.GRANT_AGENT);
+  async grants(): Promise<GrantProvider> {
+    const stored = await this.ctx.storage.get<string>(GRANT_B64_KEY);
+    const b64 = stored ?? this.env.GRANT_AGENT;
+    if (!b64)
+      throw new ForestrieUnconfigured(
+        "no agent grant configured (storage or GRANT_AGENT)",
+      );
+    return new ConfiguredGrantProvider(b64);
   }
 
   #forestrieTarget(): { baseUrl: string; rootLogId: string } {
@@ -168,9 +209,198 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
       baseUrl,
       rootLogId,
       statement,
-      await this.grants().grantB64(),
+      await (await this.grants()).grantB64(),
     );
     return { kid: bytesToHex(keys.kid()), statement, ...accepted };
+  }
+
+  /**
+   * Turn admission with user attestation (M3, plan §7): verify the signed
+   * input envelope, bind it to the wcc-1 principal, and durably submit the
+   * turn under `workId = H(envelope)` — submissionId AND idempotencyKey —
+   * so the agent cannot run work under a different id than it commits to.
+   */
+  async admitAttestedTurn(
+    envelopeB64: string,
+    principal: string,
+  ): Promise<{ workId: string; accepted: boolean; status: string }> {
+    const envelope = decodeBase64(envelopeB64);
+    const verified = await verifyUserEnvelope(envelope);
+    if (verified.address.toLowerCase() !== principal.toLowerCase())
+      throw new EnvelopeError(
+        "envelope signer does not match the session principal",
+      );
+
+    const record: WorkRecord = {
+      workId: verified.workId,
+      envelopeB64,
+      state: "submitted",
+      submittedAt: Date.now(),
+    };
+    await this.ctx.storage.put(workKey(verified.workId), record);
+
+    const submission = await this.submitMessages(
+      [
+        {
+          id: crypto.randomUUID(),
+          role: "user" as const,
+          parts: [{ type: "text" as const, text: verified.claims.input }],
+        },
+      ],
+      {
+        submissionId: verified.workId,
+        idempotencyKey: verified.workId,
+        metadata: { workId: verified.workId },
+      },
+    );
+    return {
+      workId: verified.workId,
+      accepted: submission.accepted,
+      status: submission.status,
+    };
+  }
+
+  /**
+   * Per-step agent choices (S3: the full AI-SDK step record). Only bounded
+   * projections are buffered — tool args/results are hashed, the transcript
+   * itself stays in the session ("pipe not store").
+   */
+  async onStepFinish(ctx: {
+    stepNumber?: number;
+    finishReason?: string;
+    toolCalls?: Array<{ toolName?: string; input?: unknown }>;
+    toolResults?: Array<{ toolName?: string; output?: unknown }>;
+  }): Promise<void> {
+    const encode = (value: unknown) =>
+      new TextEncoder().encode(JSON.stringify(value ?? null));
+    const step: CommittedStep = {
+      stepNumber: ctx.stepNumber ?? 0,
+      finishReason: ctx.finishReason ?? "unknown",
+      toolCalls: await Promise.all(
+        (ctx.toolCalls ?? []).map(async (c) => ({
+          toolName: c.toolName ?? "unknown",
+          argsHash: await sha256Hex(encode(c.input)),
+        })),
+      ),
+      toolResults: await Promise.all(
+        (ctx.toolResults ?? []).map(async (r) => ({
+          toolName: r.toolName ?? "unknown",
+          resultHash: await sha256Hex(encode(r.output)),
+        })),
+      ),
+    };
+    const buffer =
+      (await this.ctx.storage.get<CommittedStep[]>(STEP_BUFFER_KEY)) ?? [];
+    buffer.push(step);
+    await this.ctx.storage.put(STEP_BUFFER_KEY, buffer);
+  }
+
+  /**
+   * Turn boundary (O3: one statement per turn). Correlate the completed
+   * turn back to its admitted work unit via the submission's requestId,
+   * assemble the commitment, and hand off to the drain — nothing signs or
+   * registers inline in the chat path.
+   */
+  async onChatResponse(result: {
+    message: { id: string; parts?: Array<{ type: string; text?: string }> };
+    requestId: string;
+    status: "completed" | "error" | "aborted";
+    continuation: boolean;
+  }): Promise<void> {
+    const steps =
+      (await this.ctx.storage.get<CommittedStep[]>(STEP_BUFFER_KEY)) ?? [];
+    await this.ctx.storage.delete(STEP_BUFFER_KEY);
+    if (result.status !== "completed") return;
+
+    // Which admitted work unit ran? submissionId = workId, and the
+    // submission inspection carries the turn's requestId.
+    const works = await this.ctx.storage.list<WorkRecord>({ prefix: "work:" });
+    let matched: WorkRecord | undefined;
+    for (const record of works.values()) {
+      if (record.state !== "submitted") continue;
+      const inspection = await this.inspectSubmission(record.workId);
+      if (inspection?.requestId === result.requestId) {
+        matched = record;
+        break;
+      }
+    }
+    // Turns without an admitted envelope (e.g. raw WS chat) are unattested
+    // in cut 1 — the demo client always enters via admitAttestedTurn.
+    if (!matched) return;
+
+    const outputText = (result.message.parts ?? [])
+      .filter((p) => p.type === "text" && typeof p.text === "string")
+      .map((p) => p.text)
+      .join("");
+    matched.steps = steps;
+    matched.outputHash = await sha256Hex(new TextEncoder().encode(outputText));
+    matched.leafId = result.message.id;
+    matched.requestId = result.requestId;
+    matched.state = "queued";
+    await this.ctx.storage.put(workKey(matched.workId), matched);
+    await this.schedule(1, "drainCommitments", {});
+  }
+
+  /**
+   * Drain (plan §5 turn admission row + post-M2 decisions): renew the
+   * sealing delegation when its lease is short (delegate-at-drain), then
+   * sign and register each queued commitment. Runs from a scheduled task,
+   * never from the chat path.
+   */
+  async drainCommitments(): Promise<void> {
+    await this.#renewDelegationIfNeeded();
+    const works = await this.ctx.storage.list<WorkRecord>({ prefix: "work:" });
+    for (const record of works.values()) {
+      if (record.state !== "queued") continue;
+      try {
+        const payload = buildWorkStatementPayload({
+          workId: record.workId,
+          userEnvelopeB64: record.envelopeB64,
+          steps: record.steps ?? [],
+          outputHash: record.outputHash ?? "",
+          leafId: record.leafId ?? "",
+          requestId: record.requestId ?? "",
+        });
+        const { statement, ...accepted } = await this.signAndRegister(
+          payload,
+          "application/json",
+          `urn:thinker:work:${record.workId}`,
+        );
+        record.contentHash = accepted.contentHash;
+        record.statusUrl = accepted.statusUrl;
+        let b64 = "";
+        for (const b of statement) b64 += String.fromCharCode(b);
+        record.statementB64 = btoa(b64);
+        record.state = "registered";
+      } catch (err) {
+        record.error = String(err);
+        record.state = "error";
+      }
+      await this.ctx.storage.put(workKey(record.workId), record);
+    }
+  }
+
+  /** Delegate-at-drain: re-lease sealing when under the renewal margin. */
+  async #renewDelegationIfNeeded(): Promise<void> {
+    const coordinatorUrl = this.env.DELEGATION_COORDINATOR_URL;
+    const knownSealerKeyB64 = this.env.KNOWN_SEALER_KEY;
+    const logId = await this.ctx.storage.get<string>(AGENT_LOG_ID_KEY);
+    if (!coordinatorUrl || !knownSealerKeyB64 || !logId) return;
+    const expiresAt =
+      (await this.ctx.storage.get<number>(DELEGATION_EXPIRES_KEY)) ?? 0;
+    if (expiresAt - Date.now() / 1000 > DELEGATION_RENEW_MARGIN_S) return;
+    try {
+      const result = await delegateSealing(await this.keys(), {
+        coordinatorUrl,
+        logId,
+        knownSealerKeyB64,
+      });
+      await this.ctx.storage.put(DELEGATION_EXPIRES_KEY, result.expiresAt);
+    } catch (err) {
+      // Sequencing still works without the lease; receipts just lag. The
+      // next drain retries.
+      console.warn("delegation renewal failed", err);
+    }
   }
 
   /**
@@ -252,6 +482,49 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
       }
     }
 
+    // M3 attested turn admission: the user's signed input envelope enters
+    // here; the turn runs durably under workId (plan §7).
+    if (request.method === "POST" && url.pathname.endsWith("/turn")) {
+      try {
+        const body = (await request.json()) as { envelopeB64?: string };
+        if (!body.envelopeB64)
+          return new Response("envelopeB64 required", { status: 400 });
+        const admitted = await this.admitAttestedTurn(body.envelopeB64, principal);
+        return Response.json({ principal, ...admitted });
+      } catch (err) {
+        if (err instanceof EnvelopeError)
+          return new Response(err.message, { status: 400 });
+        return forestrieProblem(err);
+      }
+    }
+
+    // Per-instance Forestrie wiring: the grant bound to this DO's kid and
+    // the agent's own data log id (provisioned out-of-band for this kid;
+    // request-grant-at-init stores the same keys in M5).
+    if (
+      request.method === "POST" &&
+      url.pathname.endsWith("/configure-forestrie")
+    ) {
+      const body = (await request.json()) as {
+        grantB64?: string;
+        agentLogId?: string;
+      };
+      if (!body.grantB64 || !body.agentLogId)
+        return new Response("grantB64 and agentLogId required", { status: 400 });
+      await this.ctx.storage.put(GRANT_B64_KEY, body.grantB64);
+      await this.ctx.storage.put(AGENT_LOG_ID_KEY, body.agentLogId);
+      return Response.json({ principal, configured: true });
+    }
+
+    // Work-unit lifecycle inspection (harness + later the client UI).
+    if (request.method === "GET" && url.pathname.endsWith("/work")) {
+      const workId = url.searchParams.get("id");
+      if (!workId) return new Response("id query param required", { status: 400 });
+      const record = await this.ctx.storage.get<WorkRecord>(workKey(workId));
+      if (!record) return new Response("unknown workId", { status: 404 });
+      return Response.json(record);
+    }
+
     // Authorize the lane's sealer for the agent's own data log (T9). The
     // log id arrives from the provisioner for now; the request-grant-at-init
     // path (M5) will carry it with the grant.
@@ -271,6 +544,10 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
           logId: body.logId,
           knownSealerKeyB64,
         });
+        // The agent's own log id: persist so the drain can renew the lease
+        // without being told again (until request-grant-at-init carries it).
+        await this.ctx.storage.put(AGENT_LOG_ID_KEY, body.logId);
+        await this.ctx.storage.put(DELEGATION_EXPIRES_KEY, result.expiresAt);
         return Response.json({ principal, ...result });
       } catch (err) {
         return forestrieProblem(err);

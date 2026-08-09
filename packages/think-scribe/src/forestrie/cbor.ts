@@ -83,3 +83,82 @@ export function cborEncode(value: CborValue): Uint8Array {
   encodeInto(value, out);
   return Uint8Array.from(out);
 }
+
+/**
+ * Matching minimal decoder — same subset (uint/nint, bstr, tstr, array,
+ * map), definite lengths only. Enough to open a COSE Sign1 envelope and its
+ * protected header; anything outside the subset throws.
+ */
+export function cborDecode(bytes: Uint8Array): CborValue {
+  const view = { bytes, offset: 0 };
+  const value = decodeItem(view);
+  if (view.offset !== bytes.length)
+    throw new RangeError("cbor: trailing bytes after top-level item");
+  return value;
+}
+
+type DecodeView = { bytes: Uint8Array; offset: number };
+
+function take(view: DecodeView, n: number): Uint8Array {
+  if (view.offset + n > view.bytes.length)
+    throw new RangeError("cbor: truncated");
+  const out = view.bytes.subarray(view.offset, view.offset + n);
+  view.offset += n;
+  return out;
+}
+
+function decodeHead(view: DecodeView): { major: number; arg: number } {
+  const initial = take(view, 1)[0]!;
+  const major = initial >> 5;
+  const info = initial & 0x1f;
+  if (info < 24) return { major, arg: info };
+  if (info === 24) return { major, arg: take(view, 1)[0]! };
+  if (info === 25) {
+    const b = take(view, 2);
+    return { major, arg: (b[0]! << 8) | b[1]! };
+  }
+  if (info === 26) {
+    const b = take(view, 4);
+    return { major, arg: b[0]! * 0x1000000 + ((b[1]! << 16) | (b[2]! << 8) | b[3]!) };
+  }
+  if (info === 27) {
+    const b = take(view, 8);
+    let big = 0n;
+    for (const byte of b) big = (big << 8n) | BigInt(byte);
+    if (big > BigInt(Number.MAX_SAFE_INTEGER))
+      throw new RangeError("cbor: 64-bit value exceeds safe integer");
+    return { major, arg: Number(big) };
+  }
+  throw new RangeError(`cbor: unsupported additional info ${info}`);
+}
+
+function decodeItem(view: DecodeView): CborValue {
+  const { major, arg } = decodeHead(view);
+  switch (major) {
+    case 0:
+      return arg;
+    case 1:
+      return -1 - arg;
+    case 2:
+      return new Uint8Array(take(view, arg));
+    case 3:
+      return new TextDecoder().decode(take(view, arg));
+    case 4: {
+      const out: CborValue[] = [];
+      for (let i = 0; i < arg; i++) out.push(decodeItem(view));
+      return out;
+    }
+    case 5: {
+      const out = new Map<number, CborValue>();
+      for (let i = 0; i < arg; i++) {
+        const key = decodeItem(view);
+        if (typeof key !== "number")
+          throw new RangeError("cbor: only integer map keys supported");
+        out.set(key, decodeItem(view));
+      }
+      return out;
+    }
+    default:
+      throw new RangeError(`cbor: unsupported major type ${major}`);
+  }
+}
