@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "typecheck": "wrangler types && tsc -p tsconfig.json"
+    "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
     "@forestrie/think-scribe": "workspace:*",

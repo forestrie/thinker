@@ -14,3 +14,14 @@ GRANT_AGENT=<base64 completed grant transparent statement>
 # Sealing delegation for the agent-owned data log (T9):
 DELEGATION_COORDINATOR_URL=https://<lane-coordinator-origin>
 KNOWN_SEALER_KEY=<base64 registrar voucher key x||y>
+# --- M5: C3 custody + grant authority + separate user leaf ---
+# Key custody: do-resident (C2, default) | kms-seed (C3 — kid derivable
+# offline, enabling grant pre-issue). C3 needs the custodian seed:
+KEY_PROVIDER=kms-seed
+KMS_SEED_SECRET=change-me-openssl-rand-base64-32
+AGENT_KEY_EPOCH=1
+# Grant authority (scripts/authority.sh) — the DO requests grant_agent /
+# grant_user at init instead of being hand-configured:
+GRANT_AUTHORITY_URL=http://localhost:8799
+# O4 user-attestation shape: embed (default) | separate (two leaves per turn).
+ATTESTATION_MODE=separate

@@ -2,9 +2,14 @@ import { createAnthropic } from "@ai-sdk/anthropic";
 import { Think, type ThinkModel } from "@cloudflare/think";
 import type { Connection, ConnectionContext } from "agents";
 import { DoResidentKeyProvider } from "./keys/do-resident.ts";
+import { KmsSeedKeyProvider, localSeedCustodianMac } from "./keys/kms-seed.ts";
 import { bytesToHex, type KeyProvider } from "./keys/provider.ts";
 import { buildSignedStatement } from "./forestrie/cose.ts";
-import { ConfiguredGrantProvider, type GrantProvider } from "./forestrie/grant.ts";
+import {
+  ConfiguredGrantProvider,
+  GrantAuthorityClient,
+  type GrantProvider,
+} from "./forestrie/grant.ts";
 import {
   fetchReceipt,
   queryRegistration,
@@ -54,6 +59,30 @@ export interface ScribeEnv extends Cloudflare.Env {
    */
   DELEGATION_COORDINATOR_URL?: string;
   KNOWN_SEALER_KEY?: string;
+  /**
+   * Key custody selection (M5, plan §8/D4): "do-resident" (C2, default) or
+   * "kms-seed" (C3 — derive from the custodian seed; kid counterfactually
+   * derivable offline, which is what enables grant pre-issue, O5).
+   */
+  KEY_PROVIDER?: "do-resident" | "kms-seed";
+  /** C3 dev custodian seed: base64 32 bytes (prod: a narrow KMS MAC endpoint). */
+  KMS_SEED_SECRET?: string;
+  /** C3 key epoch (operator-maintained integer, ADR-0050 grammar). Default 1. */
+  AGENT_KEY_EPOCH?: string;
+  /**
+   * Grant authority (M5, GrantProvider.request): when set, the DO requests
+   * its own writer credentials at init — `grant_agent` for its kid, and in
+   * separate-leaf mode `grant_user` for the bound principal's wallet.
+   */
+  GRANT_AUTHORITY_URL?: string;
+  GRANT_AUTHORITY_TOKEN?: string;
+  /**
+   * O4 user-attestation shape: "embed" (default — the envelope rides inside
+   * the agent's leaf only) or "separate" (M5 flip — the envelope is ALSO
+   * registered as its own leaf under `grant_user`, making "the user said
+   * this" an independent, separately-receipted log entry).
+   */
+  ATTESTATION_MODE?: "embed" | "separate";
 }
 
 export const DEFAULT_MODEL_ID = "claude-sonnet-5";
@@ -71,6 +100,10 @@ const workKey = (workId: string) => `work:${workId}`;
 const STEP_BUFFER_KEY = "turn:steps";
 const AGENT_LOG_ID_KEY = "forestrie:agentLogId";
 const GRANT_B64_KEY = "forestrie:grantB64";
+/** The kid (hex) the stored agent grant endorses — re-request on mismatch. */
+const GRANT_KID_KEY = "forestrie:grantKid";
+const USER_GRANT_B64_KEY = "forestrie:userGrantB64";
+const USER_LOG_ID_KEY = "forestrie:userLogId";
 const DELEGATION_EXPIRES_KEY = "forestrie:delegationExpiresAt";
 /** Renew the sealing lease when it has less runway than this (seconds). */
 const DELEGATION_RENEW_MARGIN_S = 600;
@@ -116,6 +149,23 @@ interface WorkRecord {
   /** Scheduled-collection bookkeeping. */
   pollAttempts?: number;
   error?: string;
+  /**
+   * O4 separate mode (M5): the user's envelope registered as its OWN leaf
+   * under `grant_user` on the user's log — same lifecycle as the agent leaf,
+   * advanced by the same scheduled collector. Absent in embed mode; an
+   * `error` state here never blocks the agent leaf (graceful fallback).
+   */
+  userLeaf?: {
+    state: "registered" | "sequenced" | "receipted" | "error";
+    contentHash?: string;
+    statusUrl?: string;
+    entryId?: string;
+    receiptUrl?: string;
+    receiptB64?: string;
+    receiptedAt?: number;
+    pollAttempts?: number;
+    error?: string;
+  };
 }
 
 function decodeBase64(value: string): Uint8Array {
@@ -139,7 +189,7 @@ function decodeBase64(value: string): Uint8Array {
  * registered inline in the chat loop.
  */
 export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
-  #keys?: Promise<DoResidentKeyProvider>;
+  #keys?: Promise<KeyProvider>;
 
   /**
    * Anthropic via the AI-SDK provider (plan §11 O2). Swappable by design:
@@ -165,32 +215,103 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
   }
 
   /**
-   * The agent's statement-signing key (custody seam, plan §8). Lazy: the
-   * key is created on this instance's first use and persists (wrapped) in
-   * DO storage thereafter.
+   * The agent's statement-signing key (custody seam, plan §8). Selection is
+   * config-only (D4): C2 keeps a wrapped key in DO storage; C3 re-derives
+   * from the custodian seed + the bound principal + epoch — nothing stored,
+   * and the kid is knowable offline before this instance ever runs (O5).
    */
   keys(): Promise<KeyProvider> {
-    this.#keys ??= DoResidentKeyProvider.load(
-      this.ctx.storage,
-      decodeBase64(this.env.SCRIBE_KEK),
-    );
+    this.#keys ??= this.#loadKeys();
     return this.#keys;
   }
 
+  async #loadKeys(): Promise<KeyProvider> {
+    if ((this.env.KEY_PROVIDER ?? "do-resident") === "kms-seed") {
+      if (!this.env.KMS_SEED_SECRET)
+        throw new ForestrieUnconfigured("KEY_PROVIDER=kms-seed needs KMS_SEED_SECRET");
+      const sub = await this.ctx.storage.get<string>(PRINCIPAL_STORAGE_KEY);
+      if (!sub)
+        throw new ForestrieUnconfigured(
+          "kms-seed derivation needs the bound principal — no principal bound yet",
+        );
+      return KmsSeedKeyProvider.load(
+        localSeedCustodianMac(decodeBase64(this.env.KMS_SEED_SECRET)),
+        sub,
+        Number(this.env.AGENT_KEY_EPOCH ?? "1"),
+      );
+    }
+    return DoResidentKeyProvider.load(
+      this.ctx.storage,
+      decodeBase64(this.env.SCRIBE_KEK),
+    );
+  }
+
+  #authority(): GrantAuthorityClient | null {
+    if (!this.env.GRANT_AUTHORITY_URL) return null;
+    return new GrantAuthorityClient(
+      this.env.GRANT_AUTHORITY_URL,
+      this.env.GRANT_AUTHORITY_TOKEN,
+    );
+  }
+
   /**
-   * The agent's writer credential (grant seam, plan T4). Per-instance: the
-   * grant is bound to THIS DO's kid, so it lives in DO storage (set via
-   * `/configure-forestrie` for now; request-grant-at-init will store it the
-   * same way in M5). Env `GRANT_AGENT` is a single-user dev fallback.
+   * The agent's writer credential (grant seam, plan T4), keyed to the
+   * CURRENT kid. Resolution order:
+   *
+   *  1. DO storage, if the stored grant endorses this kid (configured via
+   *     `/configure-forestrie`, or a previous request).
+   *  2. Request-at-init (M5, GrantProvider.request): ask the authority to
+   *     endorse the kid. Under C3 the authority has typically PRE-issued the
+   *     grant on the offline-derived kid (O5) and this collects it; a kid
+   *     rotation lands here too and re-requests.
+   *  3. Env `GRANT_AGENT` — single-user dev fallback.
    */
   async grants(): Promise<GrantProvider> {
+    const keys = await this.keys();
+    const kidHex = bytesToHex(keys.kid());
     const stored = await this.ctx.storage.get<string>(GRANT_B64_KEY);
-    const b64 = stored ?? this.env.GRANT_AGENT;
-    if (!b64)
-      throw new ForestrieUnconfigured(
-        "no agent grant configured (storage or GRANT_AGENT)",
-      );
-    return new ConfiguredGrantProvider(b64);
+    const storedKid = await this.ctx.storage.get<string>(GRANT_KID_KEY);
+    if (stored && (storedKid === undefined || storedKid === kidHex))
+      return new ConfiguredGrantProvider(stored);
+
+    const authority = this.#authority();
+    if (authority) {
+      const issued = await authority.requestAgentGrant(await keys.publicKeyXY());
+      await this.ctx.storage.put(GRANT_B64_KEY, issued.grantB64);
+      await this.ctx.storage.put(GRANT_KID_KEY, kidHex);
+      await this.ctx.storage.put(AGENT_LOG_ID_KEY, issued.logId);
+      return new ConfiguredGrantProvider(issued.grantB64);
+    }
+
+    if (this.env.GRANT_AGENT) return new ConfiguredGrantProvider(this.env.GRANT_AGENT);
+    throw new ForestrieUnconfigured(
+      "no agent grant: configure one, set GRANT_AUTHORITY_URL, or set GRANT_AGENT",
+    );
+  }
+
+  #attestationMode(): "embed" | "separate" {
+    return this.env.ATTESTATION_MODE === "separate" ? "separate" : "embed";
+  }
+
+  /**
+   * The user's writer credential (O4 separate leaf): `grant_user` endorsing
+   * the bound principal's wallet address, requested from the authority on
+   * first need and stored. Returns null when not in separate mode or no
+   * authority is configured — callers fall back to embed-only.
+   */
+  async #userGrant(): Promise<{ grantB64: string; logId: string } | null> {
+    if (this.#attestationMode() !== "separate") return null;
+    const storedGrant = await this.ctx.storage.get<string>(USER_GRANT_B64_KEY);
+    const storedLog = await this.ctx.storage.get<string>(USER_LOG_ID_KEY);
+    if (storedGrant && storedLog) return { grantB64: storedGrant, logId: storedLog };
+    const authority = this.#authority();
+    if (!authority) return null;
+    const principal = await this.ctx.storage.get<string>(PRINCIPAL_STORAGE_KEY);
+    if (!principal) return null;
+    const issued = await authority.requestUserGrant(principal);
+    await this.ctx.storage.put(USER_GRANT_B64_KEY, issued.grantB64);
+    await this.ctx.storage.put(USER_LOG_ID_KEY, issued.logId);
+    return { grantB64: issued.grantB64, logId: issued.logId };
   }
 
   #forestrieTarget(): { baseUrl: string; rootLogId: string } {
@@ -370,10 +491,43 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
    */
   async drainCommitments(): Promise<void> {
     await this.#renewDelegationIfNeeded();
+    // O4 separate mode: acquire (or collect) grant_user once per drain. A
+    // failure here degrades to embed-only for this drain — the agent leaf
+    // still registers, and the next drain retries.
+    let userGrant: { grantB64: string; logId: string } | null = null;
+    try {
+      userGrant = await this.#userGrant();
+    } catch (err) {
+      console.warn("user grant acquisition failed — embed-only this drain", err);
+    }
     const works = await this.ctx.storage.list<WorkRecord>({ prefix: "work:" });
     let registered = false;
     for (const record of works.values()) {
       if (record.state !== "queued") continue;
+      // The user's leaf: the signed envelope registered AS-IS under
+      // grant_user — it already is a valid KS256 COSE Sign1 statement whose
+      // kid (the wallet address) matches the grant's grantData. Cross-ref to
+      // the agent leaf is the stable workId = H(envelope) (no ordering
+      // dependency; sequencing is async).
+      if (userGrant && !record.userLeaf) {
+        try {
+          const { baseUrl, rootLogId } = this.#forestrieTarget();
+          const accepted = await registerStatement(
+            baseUrl,
+            rootLogId,
+            decodeBase64(record.envelopeB64),
+            userGrant.grantB64,
+          );
+          record.userLeaf = {
+            state: "registered",
+            contentHash: accepted.contentHash,
+            statusUrl: accepted.statusUrl,
+          };
+          registered = true;
+        } catch (err) {
+          record.userLeaf = { state: "error", error: String(err) };
+        }
+      }
       try {
         const payload = buildWorkStatementPayload({
           workId: record.workId,
@@ -413,40 +567,81 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
   async collectReceipts(): Promise<void> {
     const works = await this.ctx.storage.list<WorkRecord>({ prefix: "work:" });
     let pending = false;
+    const inFlight = (s: string) => s === "registered" || s === "sequenced";
     for (const record of works.values()) {
-      if (record.state !== "registered" && record.state !== "sequenced") continue;
-      record.pollAttempts = (record.pollAttempts ?? 0) + 1;
-      if (record.pollAttempts > MAX_RECEIPT_POLLS) {
-        record.error = `receipt collection gave up after ${MAX_RECEIPT_POLLS} polls`;
-        record.state = "error";
-        await this.ctx.storage.put(workKey(record.workId), record);
-        continue;
-      }
-      try {
-        if (record.state === "registered" && record.statusUrl) {
-          const status = await queryRegistration(record.statusUrl);
-          if (status.state === "sequenced") {
-            record.entryId = status.entryId;
-            record.receiptUrl = status.receiptUrl;
-            record.state = "sequenced";
+      const agentInFlight = inFlight(record.state);
+      const userInFlight = record.userLeaf ? inFlight(record.userLeaf.state) : false;
+      if (!agentInFlight && !userInFlight) continue;
+
+      if (agentInFlight) {
+        record.pollAttempts = (record.pollAttempts ?? 0) + 1;
+        if (record.pollAttempts > MAX_RECEIPT_POLLS) {
+          record.error = `receipt collection gave up after ${MAX_RECEIPT_POLLS} polls`;
+          record.state = "error";
+        } else {
+          try {
+            if (record.state === "registered" && record.statusUrl) {
+              const status = await queryRegistration(record.statusUrl);
+              if (status.state === "sequenced") {
+                record.entryId = status.entryId;
+                record.receiptUrl = status.receiptUrl;
+                record.state = "sequenced";
+              }
+            }
+            if (record.state === "sequenced" && record.receiptUrl) {
+              const receipt = await fetchReceipt(record.receiptUrl);
+              if (receipt.state === "ready") {
+                let b64 = "";
+                for (const b of receipt.receipt) b64 += String.fromCharCode(b);
+                record.receiptB64 = btoa(b64);
+                record.receiptedAt = Date.now();
+                record.state = "receipted";
+              }
+            }
+          } catch (err) {
+            // Transient lane errors: keep the record in flight; the attempt
+            // cap bounds how long we retry.
+            console.warn(`receipt poll failed for ${record.workId}`, err);
           }
         }
-        if (record.state === "sequenced" && record.receiptUrl) {
-          const receipt = await fetchReceipt(record.receiptUrl);
-          if (receipt.state === "ready") {
-            let b64 = "";
-            for (const b of receipt.receipt) b64 += String.fromCharCode(b);
-            record.receiptB64 = btoa(b64);
-            record.receiptedAt = Date.now();
-            record.state = "receipted";
+      }
+
+      // The user leaf follows the identical status→receipt ladder on the
+      // user's log. Its sealing needs the USER's delegation (client-side,
+      // KS256) — until that lands, it simply stays "sequenced".
+      const leaf = record.userLeaf;
+      if (leaf && inFlight(leaf.state)) {
+        leaf.pollAttempts = (leaf.pollAttempts ?? 0) + 1;
+        if (leaf.pollAttempts > MAX_RECEIPT_POLLS) {
+          leaf.error = `user-leaf receipt collection gave up after ${MAX_RECEIPT_POLLS} polls`;
+          leaf.state = "error";
+        } else {
+          try {
+            if (leaf.state === "registered" && leaf.statusUrl) {
+              const status = await queryRegistration(leaf.statusUrl);
+              if (status.state === "sequenced") {
+                leaf.entryId = status.entryId;
+                leaf.receiptUrl = status.receiptUrl;
+                leaf.state = "sequenced";
+              }
+            }
+            if (leaf.state === "sequenced" && leaf.receiptUrl) {
+              const receipt = await fetchReceipt(leaf.receiptUrl);
+              if (receipt.state === "ready") {
+                let b64 = "";
+                for (const b of receipt.receipt) b64 += String.fromCharCode(b);
+                leaf.receiptB64 = btoa(b64);
+                leaf.receiptedAt = Date.now();
+                leaf.state = "receipted";
+              }
+            }
+          } catch (err) {
+            console.warn(`user-leaf receipt poll failed for ${record.workId}`, err);
           }
         }
-      } catch (err) {
-        // Transient lane errors: keep the record in flight; the attempt cap
-        // bounds how long we retry.
-        console.warn(`receipt poll failed for ${record.workId}`, err);
       }
-      if (record.state === "registered" || record.state === "sequenced")
+
+      if (inFlight(record.state) || (record.userLeaf && inFlight(record.userLeaf.state)))
         pending = true;
       await this.ctx.storage.put(workKey(record.workId), record);
     }
@@ -558,9 +753,13 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
       return Response.json({
         principal,
         alg: "ES256",
-        epoch: (keys as DoResidentKeyProvider).epoch?.() ?? 1,
+        keyProvider: this.env.KEY_PROVIDER ?? "do-resident",
+        attestationMode: this.#attestationMode(),
+        epoch: (keys as { epoch?: () => number }).epoch?.() ?? 1,
         kid: bytesToHex(keys.kid()),
         publicKeyXY: bytesToHex(await keys.publicKeyXY()),
+        agentLogId: (await this.ctx.storage.get<string>(AGENT_LOG_ID_KEY)) ?? null,
+        userLogId: (await this.ctx.storage.get<string>(USER_LOG_ID_KEY)) ?? null,
       });
     }
 
@@ -624,6 +823,9 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
         return new Response("grantB64 and agentLogId required", { status: 400 });
       await this.ctx.storage.put(GRANT_B64_KEY, body.grantB64);
       await this.ctx.storage.put(AGENT_LOG_ID_KEY, body.agentLogId);
+      // The hand-configured grant endorses the CURRENT kid (the caller read
+      // it from /identity) — record the binding so grants() honours it.
+      await this.ctx.storage.put(GRANT_KID_KEY, bytesToHex((await this.keys()).kid()));
       return Response.json({ principal, configured: true });
     }
 
@@ -648,15 +850,21 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
           receiptedAt: record.receiptedAt,
           leafId: record.leafId,
           error: record.error,
+          userLeaf: record.userLeaf ?? null,
           currentOutputText: record.leafId
             ? this.#currentOutputText(record.leafId)
             : null,
         }));
       return Response.json({
         principal,
+        attestationMode: this.#attestationMode(),
         identity: {
           kid: bytesToHex(keys.kid()),
           publicKeyXY: bytesToHex(await keys.publicKeyXY()),
+        },
+        forestrie: {
+          agentLogId: (await this.ctx.storage.get<string>(AGENT_LOG_ID_KEY)) ?? null,
+          userLogId: (await this.ctx.storage.get<string>(USER_LOG_ID_KEY)) ?? null,
         },
         works: exported,
       });

@@ -1,7 +1,7 @@
 {
   "name": "thinker",
   "private": true,
-  "description": "Forestrie \u00d7 Cloudflare Think demo \u2014 the Scribe: a per-user Think agent producing a tamper-evident, externally verifiable record of a conversation",
+  "description": "Forestrie × Cloudflare Think demo — the Scribe: a per-user Think agent producing a tamper-evident, externally verifiable record of a conversation",
   "scripts": {
     "dev": "pnpm --filter scribe-worker dev",
     "typecheck": "pnpm -r typecheck",
@@ -16,5 +16,10 @@
       "workerd",
       "esbuild"
     ]
+  },
+  "devDependencies": {
+    "@forestrie/encoding": "^0.5.0",
+    "@forestrie/grant-builder": "^0.2.1",
+    "@forestrie/scrapi-client": "^0.1.3"
   }
 }

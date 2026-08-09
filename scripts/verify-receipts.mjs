@@ -8,6 +8,9 @@
 //   receipt             inclusion proof + sealed checkpoint + delegation cert
 //                       under the known log key (@forestrie/receipt-verify)
 //   work-binding        workId = H(envelope); the statement embeds it
+//   user-leaf-*         (O4 separate mode, M5) the envelope's OWN leaf on the
+//                       user's log: KS256 delegation cert under the wallet →
+//                       coverage window → sealer signature → inclusion
 //   transcript-binding  H(the DO's currently-claimed output) = committed
 //                       outputHash — the check the tamper beat breaks
 //
@@ -108,7 +111,14 @@ for (const work of works) {
     checks.push({ name: "user-envelope", ok: false, detail: String(err) });
   }
 
-  const result = await verifyWorkReceipt(work, trustKey);
+  // User-leaf trust root = the bound principal's wallet address (the same
+  // enrolment-time provenance as the agent key) — not the envelope's own
+  // claim of its signer, which would be self-referential.
+  const principalAddress =
+    typeof exported.principal === "string" && /^0x[0-9a-f]{40}$/i.test(exported.principal)
+      ? Uint8Array.from(Buffer.from(exported.principal.slice(2), "hex"))
+      : null;
+  const result = await verifyWorkReceipt(work, trustKey, principalAddress);
   checks.push(...result.checks);
 
   const ok = checks.every((c) => c.ok);

@@ -15,7 +15,8 @@ registrant/writer against canopy's public APIs, never a sealer.
 packages/think-scribe/   @forestrie/think-scribe — the reusable Think extension
 apps/scribe-worker/      thin Worker hosting the Scribe Durable Object
 config/                  pre-provisioned instance wiring (see instance.example.jsonc)
-scripts/                 provision.sh (M2), verify-receipts.sh + tamper.sh (M4)
+scripts/                 provision.sh (M2), verify-receipts.sh + tamper.sh (M4),
+                         authority.sh + derive-agent-kid.mjs (M5)
 ```
 
 ## Development
@@ -94,4 +95,14 @@ tampered export).
 - **M3** (done): Tier-2 attestation — user-signed input envelope embedded in the
   agent's per-turn work statement.
 - **M4** (done): scheduled receipt collection + offline verification; the tamper beat.
-- **M5**: KMS-seed key custody (C3), pre-issued grants, separate user-endorsed leaf.
+- **M5** (done): KMS-seed key custody (C3) — the agent kid derives from
+  `custodianMAC(seed, userSub, epoch)` so it is knowable **offline before the
+  DO exists** (`scripts/derive-agent-kid.mjs`), which lets the grant authority
+  (`scripts/authority.sh` → `grant-authority.mjs`) **pre-issue** `grant_agent`
+  on it (O5). The DO collects its credentials via `GrantProvider.request` (no
+  hand-configuration), and `ATTESTATION_MODE=separate` flips O4: each turn
+  registers **two leaves** — the user's signed envelope under `grant_user`
+  (grantData = the wallet address, KS256) on a user-owned log whose sealing
+  the **wallet itself** authorizes client-side, then the agent's work
+  statement. Offline verification walks the user leaf's KS256 delegation
+  chain end-to-end. Smoke: `node test/m5-smoke.mjs`.

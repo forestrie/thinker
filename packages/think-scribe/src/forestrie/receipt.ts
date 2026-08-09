@@ -17,10 +17,22 @@
  * export you are auditing); the genesis-trust-root walk is a later rung.
  */
 import {
+  checkDelegationConstraints,
   entryIdHexToIdtimestampBe8,
   importEs256PublicKeyFromGrantDataXy64,
+  parseReceipt,
+  univocityLeafHash,
   verifyReceiptOfflineWithKeys,
 } from "@forestrie/receipt-verify";
+import {
+  PAYLOAD_DELEGATED_KEY,
+  decodeDelegatedCoseKeyFromBytes,
+  parseDelegatedCoseKeyFromPayload,
+  parseDelegationCertificate,
+  verifyDelegationCertificateKs256,
+} from "@forestrie/delegation-cose";
+import { calculateRoot, verifyInclusion, type Hasher } from "@forestrie/merklelog";
+import { verifyCoseSign1WithParsedKey } from "@forestrie/encoding";
 import { cborDecode, cborEncode, type CborMap } from "./cbor.ts";
 import { sha256Hex } from "../attestation.ts";
 
@@ -126,6 +138,15 @@ export interface WorkExport {
   receiptB64?: string;
   leafId?: string;
   currentOutputText?: string | null;
+  /** O4 separate mode: the envelope's own leaf on the user's log (M5). */
+  userLeaf?: UserLeafExport | null;
+}
+
+export interface UserLeafExport {
+  state: string;
+  entryId?: string;
+  receiptB64?: string;
+  error?: string;
 }
 
 export interface WorkCheck {
@@ -162,6 +183,8 @@ function decodeBase64(value: string): Uint8Array {
 export async function verifyWorkReceipt(
   work: WorkExport,
   agentPublicKeyXY: Uint8Array,
+  /** The user's 20-byte wallet address — trust root for the user leaf (O4). */
+  userAddress20?: Uint8Array | null,
 ): Promise<WorkVerifyResult> {
   const checks: WorkCheck[] = [];
   const fail = (name: string, detail: string): WorkVerifyResult => {
@@ -228,6 +251,15 @@ export async function verifyWorkReceipt(
       : "workId/envelope do not match the committed statement",
   });
 
+  if (work.userLeaf) {
+    const userChecks = await verifyUserLeafReceipt(
+      work.envelopeB64,
+      work.userLeaf,
+      userAddress20 ?? null,
+    );
+    checks.push(...userChecks.checks);
+  }
+
   if (typeof work.currentOutputText === "string") {
     const currentHash = await sha256Hex(
       new TextEncoder().encode(work.currentOutputText),
@@ -247,6 +279,192 @@ export async function verifyWorkReceipt(
       detail: "skipped — no current transcript claim in the export",
     });
   }
+
+  return { ok: checks.every((c) => c.ok), checks };
+}
+
+/** Browser/worker-safe SHA-256 Hasher for the merklelog proof math. */
+function subtleHasher(): Hasher {
+  let chunks: Uint8Array[] = [];
+  return {
+    reset() {
+      chunks = [];
+    },
+    update(data: Uint8Array) {
+      chunks.push(data);
+    },
+    async digest() {
+      let total = 0;
+      for (const c of chunks) total += c.length;
+      const buf = new Uint8Array(total);
+      let offset = 0;
+      for (const c of chunks) {
+        buf.set(c, offset);
+        offset += c.length;
+      }
+      chunks = [];
+      return new Uint8Array(await crypto.subtle.digest("SHA-256", buf as BufferSource));
+    },
+  };
+}
+
+/**
+ * Offline verification of the USER's leaf (O4 separate mode, M5): the signed
+ * envelope registered under `grant_user` on a log OWNED by the user's wallet
+ * key. `@forestrie/receipt-verify`'s delegation resolution is ES256-only
+ * ("KS256-rooted delegation is a server-only concern"), so this walks the
+ * KS256 rung explicitly with the same published primitives:
+ *
+ *  1. the receipt's label-1000 delegation certificate verifies under the
+ *     USER's address (delegation-cose KS256 EOA recovery) — the wallet, and
+ *     only the wallet, authorized the sealer for this log;
+ *  2. the certificate's coverage/expiry window admits the leaf
+ *     (checkDelegationConstraints — leaf time, never wall-clock);
+ *  3. the receipt COSE Sign1 verifies under the DELEGATED sealer key;
+ *  4. the leaf `H(idtimestamp ‖ H(envelope))` is included under the signed
+ *     peak (merklelog inclusion).
+ *
+ * Trust root = the user's wallet address, exactly as the agent leaf's root
+ * is the agent key ("known log key" rung, FOR-297).
+ */
+export async function verifyUserLeafReceipt(
+  envelopeB64: string,
+  userLeaf: UserLeafExport,
+  userAddress20: Uint8Array | null,
+): Promise<WorkVerifyResult> {
+  const checks: WorkCheck[] = [];
+  const fail = (name: string, detail: string): WorkVerifyResult => {
+    checks.push({ name, ok: false, detail });
+    return { ok: false, checks };
+  };
+
+  if (userLeaf.state !== "receipted" || !userLeaf.receiptB64 || !userLeaf.entryId) {
+    checks.push({
+      name: "user-leaf",
+      ok: true,
+      detail: `skipped — user leaf is ${userLeaf.state}${userLeaf.error ? ` (${userLeaf.error})` : ""}, not verifiable yet`,
+    });
+    return { ok: true, checks };
+  }
+  if (!userAddress20 || userAddress20.length !== 20)
+    return fail("user-leaf", "no user wallet address to anchor trust");
+
+  const receiptCbor = decodeBase64(userLeaf.receiptB64);
+  let parsed: ReturnType<typeof parseReceipt>;
+  try {
+    parsed = parseReceipt(receiptCbor);
+  } catch (err) {
+    return fail("user-leaf-receipt", `receipt malformed: ${err}`);
+  }
+
+  // 1. KS256 delegation certificate under the user's wallet address.
+  const unprotectedHeader = parsed.coseSign1[1];
+  const headerMap =
+    unprotectedHeader instanceof Map
+      ? unprotectedHeader
+      : new Map(Object.entries(unprotectedHeader ?? {}).map(([k, v]) => [Number(k), v]));
+  const certificate = headerMap.get(1000);
+  if (!(certificate instanceof Uint8Array))
+    return fail("user-leaf-delegation", "receipt carries no delegation certificate (label 1000)");
+  let certOk = false;
+  try {
+    certOk = await verifyDelegationCertificateKs256(certificate, userAddress20);
+  } catch (err) {
+    return fail("user-leaf-delegation", `certificate verification failed: ${err}`);
+  }
+  let addrHex = "";
+  for (const b of userAddress20) addrHex += b.toString(16).padStart(2, "0");
+  checks.push({
+    name: "user-leaf-delegation",
+    ok: certOk,
+    detail: certOk
+      ? `sealer authorized by wallet 0x${addrHex}`
+      : "delegation certificate does not verify under the user's wallet",
+  });
+  if (!certOk) return { ok: false, checks };
+
+  // Delegated sealer key from the certificate payload (label 5) — either an
+  // embedded-bytes COSE key or (as the lane emits) an inline COSE key map
+  // {1: kty, -1: crv, -2: x, -3: y}.
+  const certDecoded = cborDecode(certificate);
+  if (!Array.isArray(certDecoded) || !(certDecoded[2] instanceof Uint8Array))
+    return fail("user-leaf-delegation", "certificate is not a COSE Sign1");
+  const certPayload = cborDecode(certDecoded[2]);
+  const delegatedKeyRaw =
+    certPayload instanceof Map ? certPayload.get(PAYLOAD_DELEGATED_KEY) : undefined;
+  let delegated: { x: Uint8Array; y: Uint8Array };
+  if (delegatedKeyRaw instanceof Uint8Array) {
+    delegated = parseDelegatedCoseKeyFromPayload(
+      decodeDelegatedCoseKeyFromBytes(delegatedKeyRaw),
+    );
+  } else if (delegatedKeyRaw instanceof Map) {
+    const x = delegatedKeyRaw.get(-2);
+    const y = delegatedKeyRaw.get(-3);
+    if (!(x instanceof Uint8Array) || !(y instanceof Uint8Array) || x.length !== 32 || y.length !== 32)
+      return fail("user-leaf-delegation", "delegated COSE key map lacks 32-byte x/y");
+    delegated = { x, y };
+  } else {
+    return fail("user-leaf-delegation", "certificate carries no delegated key (label 5)");
+  }
+
+  // 2. Coverage/expiry window against the leaf (leaf time, not wall-clock).
+  const idtimestampBe8 = entryIdHexToIdtimestampBe8(userLeaf.entryId);
+  let idtimestamp = 0n;
+  for (const b of idtimestampBe8) idtimestamp = (idtimestamp << 8n) | BigInt(b);
+  const info = parseDelegationCertificate(certificate);
+  const leafMmrIndex = parsed.proof.mmrIndex ?? parsed.proof.leafIndex ?? 0n;
+  const window = checkDelegationConstraints(
+    {
+      mmrStart: BigInt(info.mmrStart),
+      mmrEnd: BigInt(info.mmrEnd),
+      issuedAt: info.issuedAt,
+      expiresAt: info.expiresAt,
+    },
+    leafMmrIndex,
+    idtimestamp,
+  );
+  checks.push({
+    name: "user-leaf-window",
+    ok: window.ok,
+    detail: window.ok ? `leaf ${leafMmrIndex} within certificate window` : window.reason,
+  });
+  if (!window.ok) return { ok: false, checks };
+
+  // 3+4. Receipt signature under the delegated key; inclusion under the peak.
+  const hasher = subtleHasher();
+  const envelope = decodeBase64(envelopeB64);
+  const inner = new Uint8Array(
+    await crypto.subtle.digest("SHA-256", envelope.buffer as ArrayBuffer),
+  );
+  const leafHash = await univocityLeafHash(idtimestampBe8, inner);
+  const leafIdx = parsed.proof.leafIndex ?? parsed.proof.mmrIndex ?? 0n;
+  const peak =
+    parsed.explicitPeak !== null
+      ? parsed.explicitPeak
+      : await calculateRoot(hasher, leafHash, parsed.proof, leafIdx);
+  const sealerKey = { x: delegated.x, y: delegated.y, curve: "P-256" as const };
+  let sigOk = await verifyCoseSign1WithParsedKey(receiptCbor, sealerKey, {
+    detachedPayload: peak,
+  });
+  if (!sigOk && parsed.explicitPeak !== null)
+    sigOk = await verifyCoseSign1WithParsedKey(receiptCbor, sealerKey);
+  checks.push({
+    name: "user-leaf-signature",
+    ok: sigOk,
+    detail: sigOk
+      ? `entry ${userLeaf.entryId}`
+      : "receipt signature does not verify under the delegated sealer key",
+  });
+  if (!sigOk) return { ok: false, checks };
+
+  const inclusionOk = await verifyInclusion(hasher, leafHash, parsed.proof, peak);
+  checks.push({
+    name: "user-leaf-inclusion",
+    ok: inclusionOk,
+    detail: inclusionOk
+      ? "envelope leaf included under the sealed peak"
+      : "inclusion proof failed — the user leaf is not under the signed peak",
+  });
 
   return { ok: checks.every((c) => c.ok), checks };
 }

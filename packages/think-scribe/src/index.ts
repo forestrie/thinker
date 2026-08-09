@@ -6,9 +6,24 @@ export {
 } from "./scribe.ts";
 export { bytesToHex, hexToBytes, type KeyProvider } from "./keys/provider.ts";
 export { DoResidentKeyProvider } from "./keys/do-resident.ts";
-export { KmsSeedKeyProvider } from "./keys/kms-seed.ts";
+export {
+  KmsSeedKeyProvider,
+  deriveAgentKey,
+  localSeedCustodianMac,
+  custodianMacInfo,
+  type CustodianMac,
+  type DerivedAgentKey,
+} from "./keys/kms-seed.ts";
 export { buildSignedStatement } from "./forestrie/cose.ts";
-export { ConfiguredGrantProvider, type GrantProvider } from "./forestrie/grant.ts";
+export {
+  ConfiguredGrantProvider,
+  GrantAuthorityClient,
+  GrantRequestError,
+  StubPaymentProvider,
+  type GrantProvider,
+  type IssuedGrant,
+  type PaymentProvider,
+} from "./forestrie/grant.ts";
 export {
   fetchReceipt,
   queryRegistration,
@@ -20,6 +35,7 @@ export {
 } from "./forestrie/register.ts";
 export {
   delegateSealing,
+  delegateSealingKs256,
   DelegateError,
   type DelegateSealingParams,
   type DelegateSealingResult,

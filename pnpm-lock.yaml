@@ -6,7 +6,17 @@ settings:
 
 importers:
 
-  .: {}
+  .:
+    devDependencies:
+      '@forestrie/encoding':
+        specifier: ^0.5.0
+        version: 0.5.0
+      '@forestrie/grant-builder':
+        specifier: ^0.2.1
+        version: 0.2.1
+      '@forestrie/scrapi-client':
+        specifier: ^0.1.3
+        version: 0.1.3
 
   apps/scribe-worker:
     dependencies:
@@ -47,6 +57,9 @@ importers:
       '@forestrie/encoding':
         specifier: ^0.5.0
         version: 0.5.0
+      '@forestrie/merklelog':
+        specifier: ^0.3.0
+        version: 0.3.0
       '@forestrie/receipt-verify':
         specifier: ^0.10.1
         version: 0.10.1
@@ -632,11 +645,17 @@ packages:
   '@forestrie/encoding@0.5.0':
     resolution: {integrity: sha512-vMuiY1qmYu5tPGPj0a/DmoOIF99QNdshp8lsug7IMMZBFLRq7d7UFIMTdOBvo5g3Diz5etSXXjBJJG+fWiLftQ==}
 
+  '@forestrie/grant-builder@0.2.1':
+    resolution: {integrity: sha512-UW0mzJyqRCumfF/Gr0SQUwBaHw2nZMp3mtmYuAKUTgMu3M1r/9TXlb/l6MttDKayn4s5HoAADs2+ry2YNliZ/Q==}
+
   '@forestrie/merklelog@0.3.0':
     resolution: {integrity: sha512-u2bFI8u2cW9uZij/x0aKBRT+asnpaqJCFMPGitQfOJSY8hGmNSbAP0LuFDVO9mtB2M/Ata/lABBur49g5ZxfcA==}
 
   '@forestrie/receipt-verify@0.10.1':
     resolution: {integrity: sha512-YSTIJTqz09FQ5jwBisqUzjDP49DPmQeebY3ZVVSZ4Px2Fdf6mYy42NEp2ZGc1b6bRYwMTPG8xWpu6BTXiPsHJA==}
+
+  '@forestrie/scrapi-client@0.1.3':
+    resolution: {integrity: sha512-ixj/Czux1fpI4VlOfqZqqi8lpbCXs/FFMc35gONZBt/WE+caTlDgZSuAm57nbTQzvZBn+rVkjse4xIxN4+Uq8g==}
 
   '@hono/node-server@2.1.0':
     resolution: {integrity: sha512-XovyyCCnBzW+zKu+z/zq8hwNs4KOR5rEMAOxo2f40Q5xoOI37IMm6MIg2COOUtUApo0i6850MTBKH2u4QLGIqg==}
@@ -2718,6 +2737,12 @@ snapshots:
     dependencies:
       '@noble/curves': 1.9.7
 
+  '@forestrie/grant-builder@0.2.1':
+    dependencies:
+      '@forestrie/encoding': 0.5.0
+      '@noble/curves': 1.9.7
+      '@noble/hashes': 1.8.0
+
   '@forestrie/merklelog@0.3.0': {}
 
   '@forestrie/receipt-verify@0.10.1':
@@ -2726,6 +2751,10 @@ snapshots:
       '@forestrie/encoding': 0.5.0
       '@forestrie/merklelog': 0.3.0
       '@noble/hashes': 1.8.0
+
+  '@forestrie/scrapi-client@0.1.3':
+    dependencies:
+      '@forestrie/encoding': 0.5.0
 
   '@hono/node-server@2.1.0(hono@4.13.1)':
     dependencies:
