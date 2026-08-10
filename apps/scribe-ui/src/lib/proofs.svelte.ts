@@ -61,6 +61,15 @@ export class ProofPanel {
 		return this.export?.works ?? [];
 	}
 
+	/**
+	 * The user's own log id — null until the first drain creates it (the DO
+	 * requests `grant_user` when the first attested turn commits), which is
+	 * why sealing can only be authorized AFTER the first turn.
+	 */
+	get userLogId(): string | null {
+		return this.export?.forestrie.userLogId ?? this.identity?.userLogId ?? null;
+	}
+
 	get anyInFlight(): boolean {
 		return this.works.some(inFlight);
 	}
@@ -144,19 +153,23 @@ export class ProofPanel {
 	async delegateUserSealing(): Promise<void> {
 		const coordinatorUrl = env.PUBLIC_DELEGATION_COORDINATOR_URL ?? '/coordinator';
 		const knownSealerKeyB64 = env.PUBLIC_KNOWN_SEALER_KEY;
-		const userLogId = this.export?.forestrie.userLogId ?? this.identity?.userLogId;
 		if (!knownSealerKeyB64) {
 			this.delegation = 'error';
 			this.delegationDetail = 'PUBLIC_KNOWN_SEALER_KEY not configured';
 			return;
 		}
-		if (!userLogId) {
-			this.delegation = 'error';
-			this.delegationDetail = 'no user log yet — send an attested turn first';
-			return;
-		}
 		this.delegation = 'working';
 		this.delegationDetail = null;
+		// The log is created at the first drain — re-pull the export so a
+		// click right after a turn sees a log the panel hasn't polled yet.
+		if (!this.userLogId) await this.refresh();
+		const userLogId = this.userLogId;
+		if (!userLogId) {
+			this.delegation = 'error';
+			this.delegationDetail =
+				'your log does not exist yet — it is created when your first attested turn commits';
+			return;
+		}
 		try {
 			const result = await delegateSealingKs256(
 				this.#wallet.privateKeyHex(),
@@ -165,6 +178,8 @@ export class ProofPanel {
 			);
 			this.delegation = 'done';
 			this.delegationDetail = `sealer ${result.sealerId} until ${new Date(result.expiresAt * 1000).toLocaleTimeString()}`;
+			// Pending user leaves can now seal — nudge collection along.
+			void this.collectNow();
 		} catch (err) {
 			this.delegation = 'error';
 			this.delegationDetail = String(err);

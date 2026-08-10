@@ -9,7 +9,8 @@
 	import Badge from '$lib/components/ui/Badge.svelte';
 	import Button from '$lib/components/ui/Button.svelte';
 	import { shortHex } from '$lib/utils.ts';
-	import { Feather, Wallet, RotateCcw } from '@lucide/svelte';
+	import ScribeMark from '$lib/components/ScribeMark.svelte';
+	import { Wallet, RotateCcw } from '@lucide/svelte';
 
 	const wallet = new DemoWallet();
 	const session = new ScribeSession(wallet);
@@ -48,7 +49,7 @@
 	>
 		<div class="flex items-center gap-2.5">
 			<span class="flex size-8 items-center justify-center rounded-lg bg-kumo-brand text-white">
-				<Feather class="size-4.5" />
+				<ScribeMark class="size-5" />
 			</span>
 			<div>
 				<h1 class="text-sm leading-tight font-semibold text-kumo-strong">The Scribe</h1>

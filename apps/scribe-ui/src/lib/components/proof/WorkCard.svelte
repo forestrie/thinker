@@ -72,6 +72,17 @@
 		{/if}
 	</div>
 
+	{#if work.state === 'error' && work.error}
+		<p class="mt-2 rounded-md bg-kumo-danger-tint px-2.5 py-1.5 text-[11px] text-kumo-danger">
+			{work.error}
+		</p>
+	{/if}
+	{#if work.userLeaf?.state === 'error' && work.userLeaf.error}
+		<p class="mt-2 rounded-md bg-kumo-warning-tint px-2.5 py-1.5 text-[11px] text-kumo-warning">
+			user leaf: {work.userLeaf.error}
+		</p>
+	{/if}
+
 	{#if verification}
 		<ul class="mt-2 space-y-1 border-t border-kumo-hairline pt-2">
 			{#each verification.checks as check (check.name)}

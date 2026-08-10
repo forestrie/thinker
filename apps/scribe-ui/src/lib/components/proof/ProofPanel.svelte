@@ -59,6 +59,7 @@
 	</Card>
 
 	{#if proofs.export?.attestationMode === 'separate'}
+		{@const sealingReady = proofs.userLogId !== null}
 		<Card title="Your log's sealing">
 			<div class="space-y-2 p-4 text-xs">
 				<p class="text-kumo-subtle">
@@ -69,8 +70,11 @@
 				<div class="flex items-center gap-2">
 					<Button
 						size="sm"
-						variant="primary"
-						disabled={proofs.delegation === 'working'}
+						variant={sealingReady ? 'primary' : 'secondary'}
+						disabled={!sealingReady || proofs.delegation === 'working'}
+						title={sealingReady
+							? 'Sign a sealing delegation for your log with your wallet'
+							: 'Your log is created when your first attested turn commits'}
 						onclick={() => proofs.delegateUserSealing()}
 					>
 						{#if proofs.delegation === 'working'}
@@ -82,9 +86,17 @@
 					</Button>
 					{#if proofs.delegation === 'done'}
 						<Badge tone="success"><KeyRound class="size-3" /> delegated</Badge>
+					{:else if sealingReady && proofs.delegation === 'idle'}
+						<Badge tone="warning">receipts wait on this</Badge>
 					{/if}
 				</div>
-				{#if proofs.delegationDetail}
+				{#if !sealingReady}
+					<p class="text-kumo-subtle">
+						Waiting for your log — it is created when your first attested turn commits. Until you
+						authorize sealing, your leaves still register and sequence; only their receipts wait.
+						The agent's own receipts are unaffected.
+					</p>
+				{:else if proofs.delegationDetail}
 					<p class={proofs.delegation === 'error' ? 'text-kumo-danger' : 'text-kumo-subtle'}>
 						{proofs.delegationDetail}
 					</p>
