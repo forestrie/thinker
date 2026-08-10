@@ -20,6 +20,7 @@
 	} = $props();
 
 	const tones = {
+		held: 'warning',
 		submitted: 'neutral',
 		queued: 'neutral',
 		registered: 'info',
@@ -27,6 +28,8 @@
 		receipted: 'success',
 		error: 'danger'
 	} as const;
+	const userLeafLabel = (state: string) =>
+		state === 'held' ? 'awaiting your authorization' : state;
 
 	const claims = $derived(envelopeClaims(b64ToBytes(work.envelopeB64)));
 	const input = $derived(typeof claims?.input === 'string' ? claims.input : '(unreadable)');
@@ -61,7 +64,7 @@
 				tone={tones[work.userLeaf.state]}
 				title={work.userLeaf.error ?? work.userLeaf.entryId ?? undefined}
 			>
-				<User class="size-3" /> user · {work.userLeaf.state}
+				<User class="size-3" /> user · {userLeafLabel(work.userLeaf.state)}
 			</Badge>
 		{/if}
 		{#if work.state === 'receipted'}

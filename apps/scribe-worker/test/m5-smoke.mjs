@@ -271,10 +271,13 @@ async function main() {
     identity2.agentLogId === pre.logId,
     `agent log ${identity2.agentLogId}`,
   );
-  check("grant_user issued at drain (user log exists)", !!identity2.userLogId, `user log ${identity2.userLogId}`);
+  check("grant_user issued (user log exists)", !!identity2.userLogId, `user log ${identity2.userLogId}`);
+  // Held-leaf ordering (2026-08-10): before the wallet authorizes sealing,
+  // the user leaf is HELD, not registered — never sequenced into a log
+  // nothing can seal. It registers at the release drain after step 7.
   check(
-    "user leaf registered on the user's log",
-    ["registered", "sequenced", "receipted"].includes(work.userLeaf?.state),
+    "user leaf held pending sealing authorization",
+    work.userLeaf?.state === "held",
     work.userLeaf?.state ?? work.userLeaf?.error,
   );
 
@@ -297,6 +300,15 @@ async function main() {
   }
   if (userDel)
     check("user delegate-sealing (KS256, client wallet)", true, `sealer ${userDel.sealerId}`);
+
+  // 7b. Confirm the delegation to the DO — releases held user leaves.
+  if (userDel) {
+    const rel = await fetchRetry(`${AGENT}/user-sealing-delegated`, {
+      method: "POST",
+      headers: AUTH,
+    });
+    check("held user leaves released", rel.ok, rel.ok ? "" : await rel.text());
+  }
 
   // 8. User leaf → receipted (sealing is reactive; give it a few minutes).
   if (userDel) {

@@ -104,6 +104,13 @@ const GRANT_B64_KEY = "forestrie:grantB64";
 const GRANT_KID_KEY = "forestrie:grantKid";
 const USER_GRANT_B64_KEY = "forestrie:userGrantB64";
 const USER_LOG_ID_KEY = "forestrie:userLogId";
+/**
+ * Set (epoch ms) when the CLIENT confirms the wallet signed a sealing
+ * delegation for the user's log. User leaves are HELD until then — the
+ * provision.sh ordering (prepare → delegate → create) applied to the user
+ * flow: never register a leaf into a log nothing is authorized to seal.
+ */
+const USER_SEALING_DELEGATED_KEY = "forestrie:userSealingDelegatedAt";
 const DELEGATION_EXPIRES_KEY = "forestrie:delegationExpiresAt";
 /** Renew the sealing lease when it has less runway than this (seconds). */
 const DELEGATION_RENEW_MARGIN_S = 600;
@@ -154,9 +161,10 @@ interface WorkRecord {
    * under `grant_user` on the user's log — same lifecycle as the agent leaf,
    * advanced by the same scheduled collector. Absent in embed mode; an
    * `error` state here never blocks the agent leaf (graceful fallback).
+   * "held" = awaiting the user's sealing authorization (not yet registered).
    */
   userLeaf?: {
-    state: "registered" | "sequenced" | "receipted" | "error";
+    state: "held" | "registered" | "sequenced" | "receipted" | "error";
     contentHash?: string;
     statusUrl?: string;
     entryId?: string;
@@ -501,31 +509,33 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
       console.warn("user grant acquisition failed — embed-only this drain", err);
     }
     const works = await this.ctx.storage.list<WorkRecord>({ prefix: "work:" });
+    const sealingDelegated =
+      (await this.ctx.storage.get<number>(USER_SEALING_DELEGATED_KEY)) !== undefined;
     let registered = false;
     for (const record of works.values()) {
+      // Release pass: leaves held while the user hadn't authorized sealing
+      // register now, regardless of how far the agent side has advanced.
+      if (userGrant && sealingDelegated && record.userLeaf?.state === "held") {
+        record.userLeaf = await this.#registerUserLeaf(record, userGrant.grantB64);
+        if (record.userLeaf.state === "registered") registered = true;
+        await this.ctx.storage.put(workKey(record.workId), record);
+      }
       if (record.state !== "queued") continue;
       // The user's leaf: the signed envelope registered AS-IS under
       // grant_user — it already is a valid KS256 COSE Sign1 statement whose
       // kid (the wallet address) matches the grant's grantData. Cross-ref to
       // the agent leaf is the stable workId = H(envelope) (no ordering
-      // dependency; sequencing is async).
+      // dependency; sequencing is async). Until the wallet has authorized
+      // sealing for the user's log, the leaf is HELD, not registered — a
+      // leaf that sequences before any delegation exists cannot seal until
+      // the sealer's slow retry, and its receipt poll budget burns down
+      // waiting (the 2026-08-10 stall).
       if (userGrant && !record.userLeaf) {
-        try {
-          const { baseUrl, rootLogId } = this.#forestrieTarget();
-          const accepted = await registerStatement(
-            baseUrl,
-            rootLogId,
-            decodeBase64(record.envelopeB64),
-            userGrant.grantB64,
-          );
-          record.userLeaf = {
-            state: "registered",
-            contentHash: accepted.contentHash,
-            statusUrl: accepted.statusUrl,
-          };
-          registered = true;
-        } catch (err) {
-          record.userLeaf = { state: "error", error: String(err) };
+        if (!sealingDelegated) {
+          record.userLeaf = { state: "held" };
+        } else {
+          record.userLeaf = await this.#registerUserLeaf(record, userGrant.grantB64);
+          if (record.userLeaf.state === "registered") registered = true;
         }
       }
       try {
@@ -563,6 +573,45 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
       // until a second turn happens to drain again.
       await this.#renewDelegationIfNeeded();
       await this.#ensureReceiptCollection(2);
+    }
+  }
+
+  /** Register the user's envelope as its own leaf under grant_user. */
+  async #registerUserLeaf(
+    record: WorkRecord,
+    grantB64: string,
+  ): Promise<NonNullable<WorkRecord["userLeaf"]>> {
+    try {
+      const { baseUrl, rootLogId } = this.#forestrieTarget();
+      const accepted = await registerStatement(
+        baseUrl,
+        rootLogId,
+        decodeBase64(record.envelopeB64),
+        grantB64,
+      );
+      return {
+        state: "registered",
+        contentHash: accepted.contentHash,
+        statusUrl: accepted.statusUrl,
+      };
+    } catch (err) {
+      return { state: "error", error: String(err) };
+    }
+  }
+
+  /**
+   * Grant-at-bind (UX ordering, 2026-08-10): the user's address is known
+   * the moment the principal binds, so `grant_user` (and with it the user's
+   * log) is requested right away from a scheduled task — the authorize-
+   * sealing step can then happen during onboarding, BEFORE the first turn,
+   * and the first user leaf seals on the sealer's first reactive attempt.
+   * Failures are logged; the drain's request path remains the fallback.
+   */
+  async acquireUserGrant(): Promise<void> {
+    try {
+      await this.#userGrant();
+    } catch (err) {
+      console.warn("grant-at-bind user grant acquisition failed — drain will retry", err);
     }
   }
 
@@ -728,6 +777,11 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
     const bound = await this.ctx.storage.get<string>(PRINCIPAL_STORAGE_KEY);
     if (bound === undefined) {
       await this.ctx.storage.put(PRINCIPAL_STORAGE_KEY, sub);
+      // Grant-at-bind: kick user-grant acquisition off the request path —
+      // issuance waits on an auth-log seal (up to ~a minute) and nothing
+      // here should block on it.
+      if (this.#attestationMode() === "separate" && this.env.GRANT_AUTHORITY_URL)
+        await this.schedule(0, "acquireUserGrant", {});
       return sub;
     }
     if (bound !== sub)
@@ -768,6 +822,8 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
         publicKeyXY: bytesToHex(await keys.publicKeyXY()),
         agentLogId: (await this.ctx.storage.get<string>(AGENT_LOG_ID_KEY)) ?? null,
         userLogId: (await this.ctx.storage.get<string>(USER_LOG_ID_KEY)) ?? null,
+        userSealingDelegated:
+          (await this.ctx.storage.get<number>(USER_SEALING_DELEGATED_KEY)) !== undefined,
       });
     }
 
@@ -873,6 +929,8 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
         forestrie: {
           agentLogId: (await this.ctx.storage.get<string>(AGENT_LOG_ID_KEY)) ?? null,
           userLogId: (await this.ctx.storage.get<string>(USER_LOG_ID_KEY)) ?? null,
+          userSealingDelegated:
+            (await this.ctx.storage.get<number>(USER_SEALING_DELEGATED_KEY)) !== undefined,
         },
         works: exported,
       });
@@ -882,6 +940,20 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
     if (request.method === "POST" && url.pathname.endsWith("/collect-receipts")) {
       await this.#ensureReceiptCollection(1);
       return Response.json({ principal, scheduled: true });
+    }
+
+    // The client confirms the wallet signed a sealing delegation for the
+    // user's log (delegateSealingKs256 ran browser-side — the DO cannot
+    // observe it, the coordinator has no read API). Held user leaves are
+    // released by the drain this schedules. Worst case for a false claim
+    // is the pre-hold behavior: leaves sequence and wait on the sealer.
+    if (
+      request.method === "POST" &&
+      url.pathname.endsWith("/user-sealing-delegated")
+    ) {
+      await this.ctx.storage.put(USER_SEALING_DELEGATED_KEY, Date.now());
+      await this.schedule(1, "drainCommitments", {});
+      return Response.json({ principal, delegated: true });
     }
 
     // Work-unit lifecycle inspection (harness + later the client UI).

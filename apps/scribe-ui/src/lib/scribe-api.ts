@@ -37,6 +37,7 @@ export interface IdentityResponse {
 	publicKeyXY: string;
 	agentLogId: string | null;
 	userLogId: string | null;
+	userSealingDelegated?: boolean;
 }
 
 export interface TurnResponse {
@@ -60,7 +61,7 @@ export interface WorkExportWire {
 	leafId?: string;
 	error?: string;
 	userLeaf: {
-		state: 'registered' | 'sequenced' | 'receipted' | 'error';
+		state: 'held' | 'registered' | 'sequenced' | 'receipted' | 'error';
 		contentHash?: string;
 		entryId?: string;
 		receiptB64?: string;
@@ -74,7 +75,11 @@ export interface ReceiptsExport {
 	principal: string;
 	attestationMode: 'embed' | 'separate';
 	identity: { kid: string; publicKeyXY: string };
-	forestrie: { agentLogId: string | null; userLogId: string | null };
+	forestrie: {
+		agentLogId: string | null;
+		userLogId: string | null;
+		userSealingDelegated?: boolean;
+	};
 	works: WorkExportWire[];
 }
 
@@ -140,6 +145,16 @@ export async function fetchReceipts(sub: string, token: string): Promise<Receipt
 export async function kickReceiptCollection(sub: string, token: string): Promise<void> {
 	await expectJson(
 		await fetch(`${agentPath(sub)}/collect-receipts`, {
+			method: 'POST',
+			headers: { Authorization: `Bearer ${token}` }
+		})
+	);
+}
+
+/** Tell the DO the wallet authorized sealing — releases held user leaves. */
+export async function confirmUserSealingDelegated(sub: string, token: string): Promise<void> {
+	await expectJson(
+		await fetch(`${agentPath(sub)}/user-sealing-delegated`, {
 			method: 'POST',
 			headers: { Authorization: `Bearer ${token}` }
 		})

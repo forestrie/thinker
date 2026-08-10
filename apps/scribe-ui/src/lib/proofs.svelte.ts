@@ -5,6 +5,7 @@ import {
 } from '@forestrie/think-scribe/forestrie/receipt';
 import { delegateSealingKs256 } from '@forestrie/think-scribe/forestrie/delegate';
 import {
+	confirmUserSealingDelegated,
 	fetchIdentity,
 	fetchReceipts,
 	kickReceiptCollection,
@@ -70,6 +71,14 @@ export class ProofPanel {
 		return this.export?.forestrie.userLogId ?? this.identity?.userLogId ?? null;
 	}
 
+	/** True once the DO knows sealing was authorized (any session). */
+	get sealingDelegated(): boolean {
+		return (
+			this.delegation === 'done' ||
+			(this.export?.forestrie.userSealingDelegated ?? this.identity?.userSealingDelegated ?? false)
+		);
+	}
+
 	get anyInFlight(): boolean {
 		return this.works.some(inFlight);
 	}
@@ -103,7 +112,12 @@ export class ProofPanel {
 
 	#schedulePoll(): void {
 		if (this.#pollTimer) clearTimeout(this.#pollTimer);
-		if (!this.anyInFlight) return;
+		// Keep polling while receipts are in flight, and during onboarding
+		// while grant-at-bind is still creating the user's log (~a minute) —
+		// the activation button waits on its id.
+		const onboarding =
+			this.export?.attestationMode === 'separate' && this.userLogId === null;
+		if (!this.anyInFlight && !onboarding) return;
 		this.#pollTimer = setTimeout(() => {
 			void this.refresh();
 		}, POLL_MS);
@@ -178,7 +192,13 @@ export class ProofPanel {
 			);
 			this.delegation = 'done';
 			this.delegationDetail = `sealer ${result.sealerId} until ${new Date(result.expiresAt * 1000).toLocaleTimeString()}`;
-			// Pending user leaves can now seal — nudge collection along.
+			// Tell the DO: held user leaves release, and collection resumes
+			// for anything already waiting on the lane.
+			try {
+				await confirmUserSealingDelegated(this.#session.sub!, await this.#session.ensure());
+			} catch (err) {
+				console.warn('delegation confirmation failed — leaves release on a later drain', err);
+			}
 			void this.collectNow();
 		} catch (err) {
 			this.delegation = 'error';

@@ -60,21 +60,22 @@
 
 	{#if proofs.export?.attestationMode === 'separate'}
 		{@const sealingReady = proofs.userLogId !== null}
-		<Card title="Your log's sealing">
+		{@const activated = proofs.sealingDelegated}
+		<Card title="Activate your log">
 			<div class="space-y-2 p-4 text-xs">
 				<p class="text-kumo-subtle">
 					Your signed inputs land as their own leaves on a log <em>owned by your wallet</em>. Only
 					your key can authorize the lane's sealer to checkpoint it — done here, in the browser;
-					the agent never holds your key.
+					the agent never holds your key. Until then your leaves are held, unregistered.
 				</p>
 				<div class="flex items-center gap-2">
 					<Button
 						size="sm"
-						variant={sealingReady ? 'primary' : 'secondary'}
+						variant={sealingReady && !activated ? 'primary' : 'secondary'}
 						disabled={!sealingReady || proofs.delegation === 'working'}
 						title={sealingReady
 							? 'Sign a sealing delegation for your log with your wallet'
-							: 'Your log is created when your first attested turn commits'}
+							: 'Your log is being created — a moment'}
 						onclick={() => proofs.delegateUserSealing()}
 					>
 						{#if proofs.delegation === 'working'}
@@ -82,19 +83,18 @@
 						{:else}
 							<Stamp class="size-3.5" />
 						{/if}
-						Authorize sealing
+						{activated ? 'Renew sealing lease' : 'Authorize sealing'}
 					</Button>
-					{#if proofs.delegation === 'done'}
+					{#if activated}
 						<Badge tone="success"><KeyRound class="size-3" /> delegated</Badge>
-					{:else if sealingReady && proofs.delegation === 'idle'}
-						<Badge tone="warning">receipts wait on this</Badge>
+					{:else if sealingReady}
+						<Badge tone="warning">activate before chatting</Badge>
 					{/if}
 				</div>
 				{#if !sealingReady}
 					<p class="text-kumo-subtle">
-						Waiting for your log — it is created when your first attested turn commits. Until you
-						authorize sealing, your leaves still register and sequence; only their receipts wait.
-						The agent's own receipts are unaffected.
+						Your log is being created (it needs a grant from the authority — up to a minute).
+						You can chat meanwhile; your leaves are held until you authorize.
 					</p>
 				{:else if proofs.delegationDetail}
 					<p class={proofs.delegation === 'error' ? 'text-kumo-danger' : 'text-kumo-subtle'}>
