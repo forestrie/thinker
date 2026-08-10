@@ -27,9 +27,11 @@
 // Env: FORESTRIE_BASE_URL, DELEGATION_COORDINATOR_URL, COORDINATOR_APP_TOKEN
 // (user grants only), GRANT_AUTHORITY_TOKEN (optional bearer), PORT.
 import { createServer } from "node:http";
+import { createPrivateKey, createPublicKey } from "node:crypto";
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { delegateSealing } from "../packages/think-scribe/src/forestrie/delegate.ts";
 import {
   bytesToForestrieGrantBase64,
   dataLogCreateExtendFlags,
@@ -60,6 +62,13 @@ const AUTHORITY_TOKEN = process.env.GRANT_AUTHORITY_TOKEN ?? "";
 const PORT = Number(process.env.PORT ?? "8799");
 /** Overall budget for grant sequencing + receipt (auth-log seal is ~1 min). */
 const GRANT_TIMEOUT_MS = 240_000;
+/** Registrar's public voucher key (as provision.sh) — not a secret. */
+const KNOWN_SEALER_KEY =
+  process.env.KNOWN_SEALER_KEY ??
+  "z1YarLKXrsRe5egrwrFfbeYadd9lOqplKxbRuMGymHUOSY7YAfdOhhPWb3H72TrPMiMLw0CBMpDPXUGMEvbkOQ==";
+/** Renew the auth-log sealing lease when under this runway (seconds). */
+const SEALING_RENEW_MARGIN_S = 1800;
+const SEALING_CHECK_INTERVAL_MS = 600_000;
 
 const ids = Object.fromEntries(
   readFileSync(join(P, "ids.env"), "utf8")
@@ -79,8 +88,60 @@ const authGrantB64 = readFileSync(join(P, "auth-grant.b64"), "utf8").trim();
 const hex = (b) => Buffer.from(b).toString("hex");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// --- auth-log sealing lease (the gap the 2026-08-10 outage exposed) --------
+// Grant issuance blocks on the grant's inclusion receipt, which needs the
+// AUTH log sealed — but the lease provision.sh signed at `up` time expires
+// (~6h TTL) and nothing renewed it, so every grant request eventually 502'd
+// with "grant receipt timed out (auth-log seal)". The authority holds K(L)
+// for its own auth log, so it renews the lease itself: at startup, on a
+// timer, and just-in-time before each issuance — the same delegate-at-drain
+// pattern the Scribe DO uses for the agent's data log.
+
+let authorityKeyPairPromise;
+function authorityKeyPair() {
+  authorityKeyPairPromise ??= (async () => {
+    const priv = createPrivateKey(authorityPem);
+    const pkcs8 = priv.export({ type: "pkcs8", format: "der" });
+    const spki = createPublicKey(priv).export({ type: "spki", format: "der" });
+    const alg = { name: "ECDSA", namedCurve: "P-256" };
+    return {
+      privateKey: await crypto.subtle.importKey("pkcs8", pkcs8, alg, false, ["sign"]),
+      publicKey: await crypto.subtle.importKey("spki", spki, alg, true, ["verify"]),
+    };
+  })();
+  return authorityKeyPairPromise;
+}
+
+let sealingExpiresAt = 0;
+let sealingRenewal = null;
+function renewAuthLogSealingIfNeeded() {
+  if (sealingExpiresAt - Date.now() / 1000 > SEALING_RENEW_MARGIN_S) return Promise.resolve();
+  sealingRenewal ??= (async () => {
+    try {
+      const result = await delegateSealing(
+        { signingKeyPair: () => authorityKeyPair() },
+        { coordinatorUrl: COORDINATOR_URL, logId: AUTH_LOG_ID, knownSealerKeyB64: KNOWN_SEALER_KEY },
+      );
+      sealingExpiresAt = result.expiresAt;
+      console.log(
+        `auth-log sealing lease renewed — sealer ${result.sealerId}, expires ${new Date(result.expiresAt * 1000).toISOString()}`,
+      );
+    } catch (err) {
+      // Issuance degrades to the timeout the caller already handles; the
+      // next check retries. Never crash the service over a renewal.
+      console.error("auth-log sealing renewal failed (grants may time out until it succeeds):", err);
+    } finally {
+      sealingRenewal = null;
+    }
+  })();
+  return sealingRenewal;
+}
+
 /** Issue a creation grant endorsing `grantData` on a fresh data log. */
 async function issueCreationGrant(grantData) {
+  // Just-in-time lease check: cheap no-op while the lease has runway, and
+  // closes the window between timer ticks after a long idle stretch.
+  await renewAuthLogSealingIfNeeded();
   const logId = crypto.randomUUID();
   const grant = {
     logId: uuidToBytes(logId),
@@ -237,4 +298,6 @@ server.listen(PORT, () => {
     `grant-authority on :${PORT} — auth log ${AUTH_LOG_ID}, lane ${BASE_URL}` +
       (COORDINATOR_APP_TOKEN ? ", coordinator operator token loaded" : ", NO coordinator token (user grants will fail)"),
   );
+  void renewAuthLogSealingIfNeeded();
+  setInterval(() => void renewAuthLogSealingIfNeeded(), SEALING_CHECK_INTERVAL_MS).unref();
 });

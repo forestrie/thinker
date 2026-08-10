@@ -555,7 +555,15 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
       }
       await this.ctx.storage.put(workKey(record.workId), record);
     }
-    if (registered) await this.#ensureReceiptCollection(2);
+    if (registered) {
+      // Re-check the sealing lease AFTER registering: on the drain that
+      // first acquires the grant, agentLogId is only stored inside the loop
+      // (request-at-init), so the pre-loop check had nothing to lease —
+      // without this, a fresh instance's leaves sequence but never seal
+      // until a second turn happens to drain again.
+      await this.#renewDelegationIfNeeded();
+      await this.#ensureReceiptCollection(2);
+    }
   }
 
   /**
