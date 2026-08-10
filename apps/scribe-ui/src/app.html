@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en" data-mode="light">
+	<head>
+		<meta charset="utf-8" />
+		<link rel="icon" href="%sveltekit.assets%/favicon.svg" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>Scribe — attested conversation</title>
+		<script>
+			// Kumo dark mode rides [data-mode="dark"]; follow the OS preference
+			// before first paint so there is no flash.
+			if (window.matchMedia('(prefers-color-scheme: dark)').matches)
+				document.documentElement.dataset.mode = 'dark';
+		</script>
+		%sveltekit.head%
+	</head>
+	<body class="bg-kumo-base text-kumo-default">
+		<div style="display: contents">%sveltekit.body%</div>
+	</body>
+</html>

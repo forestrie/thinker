@@ -6,7 +6,8 @@
   "description": "Reusable Cloudflare Think extension: a Scribe agent that commits attested work statements to a Forestrie transparency log",
   "exports": {
     ".": "./src/index.ts",
-    "./forestrie/receipt": "./src/forestrie/receipt.ts"
+    "./forestrie/receipt": "./src/forestrie/receipt.ts",
+    "./forestrie/delegate": "./src/forestrie/delegate.ts"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json"

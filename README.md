@@ -14,6 +14,7 @@ registrant/writer against canopy's public APIs, never a sealer.
 ```
 packages/think-scribe/   @forestrie/think-scribe — the reusable Think extension
 apps/scribe-worker/      thin Worker hosting the Scribe Durable Object
+apps/scribe-ui/          SvelteKit chat + Forestrie proof panel (MU)
 config/                  pre-provisioned instance wiring (see instance.example.jsonc)
 scripts/                 provision.sh (M2), verify-receipts.sh + tamper.sh (M4),
                          authority.sh + derive-agent-kid.mjs (M5)
@@ -106,3 +107,34 @@ tampered export).
   the **wallet itself** authorizes client-side, then the agent's work
   statement. Offline verification walks the user leaf's KS256 delegation
   chain end-to-end. Smoke: `node test/m5-smoke.mjs`.
+- **MU** (done): `apps/scribe-ui` — the demo's face. SvelteKit 2 / Svelte 5 on
+  `adapter-cloudflare`, Cloudflare's design system via **Kumo design tokens on
+  Tailwind v4** (`@cloudflare/kumo/styles/tailwind`; Kumo's React components
+  don't port — components are rebuilt in Svelte, mandate-aligned). The
+  framework-agnostic `agents/client` `AgentClient` is wrapped in Svelte runes
+  (`src/lib/chat.svelte.ts`): transcript sync, live stream-chunk accumulation,
+  the resume handshake — but turns are **never** sent as WS chat requests;
+  each is a wallet-signed KS256 envelope admitted via `POST /turn`. The
+  browser wallet (localStorage key) runs the whole client choreography:
+  wcc-1 session, envelope signing, and the **user-log sealing delegation**
+  (`delegateSealingKs256`, in the browser — the agent never holds the key).
+  The **Forestrie proof panel** consumes `GET /receipts` and verifies fully
+  offline in the browser with the same `think-scribe/forestrie/receipt`
+  primitives — statement signature, receipt, work binding, the user leaf's
+  KS256 chain, and transcript binding (the tamper beat renders as a
+  "tampered" callout when the DO's memory diverges from the receipted
+  commitment).
+
+  ```sh
+  pnpm dev        # the worker, :8787
+  pnpm dev:ui     # vite dev, :5173 — proxies /auth + /agents (incl. WS) to :8787
+  ```
+
+  Dev lifts `DELEGATION_COORDINATOR_URL` / `KNOWN_SEALER_KEY` from the
+  worker's `.dev.vars` (coordinator proxied at `/coordinator`); deployed, set
+  `PUBLIC_SCRIBE_BASE`, `PUBLIC_DELEGATION_COORDINATOR_URL`,
+  `PUBLIC_KNOWN_SEALER_KEY`. Smoke (against both dev servers, from
+  `apps/scribe-ui`): `node --experimental-strip-types test/mu-smoke.mjs` —
+  drives the exact client choreography headlessly: proxy, session, WS
+  transcript sync, offline verification of receipted works, a live streamed
+  turn.
