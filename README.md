@@ -9,6 +9,10 @@ Plan of record: `devdocs/plans/plan-2608-08-cf-think-demo/thinker.md` (in the
 forestrie devdocs repo). This repo is **external to canopy** — the agent is a
 registrant/writer against canopy's public APIs, never a sealer.
 
+**What is this, really?** [SCRIBE.md](./SCRIBE.md) — the user-facing
+functionality and value, and the Forestrie features the demo exercises,
+each in their own words.
+
 ## Layout
 
 ```
