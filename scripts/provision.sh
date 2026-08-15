@@ -132,8 +132,13 @@ cmd_up() {
     step "auth log — reusing $AUTH_LOG_ID"
   else
     step "auth log $AUTH_LOG_ID (prepare → delegate → create)"
+    # --child-payment-required (adr-0062, plan-2608-09 W4a): the AUTH grant
+    # carries GF_DERIVED|GF_CHILD_PAYMENT_REQUIRED, so user grants registered
+    # under it at runtime x402-402 once the lane's REGISTER_GRANT_ADMISSION
+    # flips (W5). Needs forestrie-cli >= the PR#47 build (v0.6.0 lacks it).
     local common=(--base-url "$FORESTRIE_BASE_URL" \
       --owner-log "$ROOT_LOG_ID" --new-log "$AUTH_LOG_ID" --auth-log \
+      --child-payment-required \
       --signer-pem "$AUTHORITY_PEM" --sign-with "$ROOT_PEM" \
       --parent-grant-b64 "$(cat "$P/root-grant.b64")" \
       --out-b64 "$P/auth-grant.b64")

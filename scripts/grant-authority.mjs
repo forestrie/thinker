@@ -69,6 +69,14 @@ const KNOWN_SEALER_KEY =
 /** Renew the auth-log sealing lease when under this runway (seconds). */
 const SEALING_RENEW_MARGIN_S = 1800;
 const SEALING_CHECK_INTERVAL_MS = 600_000;
+/**
+ * User-grant batch size (plan-2608-09 W4a): issued user grants carry
+ * `maxHeight = batch` — the unit the x402 gate prices
+ * (REGISTER_GRANT_PRICE_ATOMIC × maxHeight) and the prepaid-turns budget the
+ * Scribe DO enforces (W4c). Agent grants stay maxHeight 0 (ungated,
+ * pre-issued at provisioning).
+ */
+const USER_GRANT_BATCH_TURNS = Number(process.env.USER_GRANT_BATCH_TURNS ?? "16");
 
 const ids = Object.fromEntries(
   readFileSync(join(P, "ids.env"), "utf8")
@@ -137,8 +145,12 @@ function renewAuthLogSealingIfNeeded() {
   return sealingRenewal;
 }
 
-/** Issue a creation grant endorsing `grantData` on a fresh data log. */
-async function issueCreationGrant(grantData) {
+/**
+ * Issue a creation grant endorsing `grantData` on a fresh data log.
+ * `maxHeight` > 0 sizes the grant to a purchased batch (user grants, W4a);
+ * 0 leaves it unbounded (agent grants).
+ */
+async function issueCreationGrant(grantData, maxHeight = 0) {
   // Just-in-time lease check: cheap no-op while the lease has runway, and
   // closes the window between timer ticks after a long idle stretch.
   await renewAuthLogSealingIfNeeded();
@@ -147,7 +159,7 @@ async function issueCreationGrant(grantData) {
     logId: uuidToBytes(logId),
     ownerLogId: uuidToBytes(AUTH_LOG_ID),
     grant: dataLogCreateExtendFlags(),
-    maxHeight: 0,
+    maxHeight,
     minGrowth: 0,
     grantData,
   };
@@ -253,9 +265,17 @@ async function handleUserGrant(body) {
 
   recordBooks("grant_user", addrHex, body.paymentCommitment);
   const address = Uint8Array.from(Buffer.from(addrHex, "hex"));
-  const issued = await issueCreationGrant(address);
+  const issued = await issueCreationGrant(address, USER_GRANT_BATCH_TURNS);
   await uploadKs256PublicRoot(issued.logId, address);
-  const out = { kind: "user", address: `0x${addrHex}`, logId: issued.logId, grantB64: issued.grantB64 };
+  // maxHeight rides the response so the Scribe DO can seed prepaidTurns (W4c)
+  // without decoding the grant payload.
+  const out = {
+    kind: "user",
+    address: `0x${addrHex}`,
+    logId: issued.logId,
+    grantB64: issued.grantB64,
+    maxHeight: USER_GRANT_BATCH_TURNS,
+  };
   writeFileSync(issuedPath, JSON.stringify(out, null, 2));
   console.log(`issued grant_user addr=0x${addrHex} log=${issued.logId}`);
   return { status: 201, body: { ...out, preIssued: false } };
