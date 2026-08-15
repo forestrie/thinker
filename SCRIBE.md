@@ -60,6 +60,23 @@ statement payload is never stored — only its hash is committed.
 - Every grant carries its own inclusion receipt — credentials are themselves
   transparency-logged.
 
+**Batch payment for work (x402, plan-2608-09):** the user pays **once** for a
+`maxHeight`-bounded *batch* grant good for N turns, not per message — the 402
+challenge and wallet signature stay entirely off the turn path, so chatting
+runs at normal latency. The requirement is a **parent-grant policy bit**
+(`GF_DERIVED | GF_CHILD_PAYMENT_REQUIRED`), transparency-logged and
+receipt-provable, switchable per hierarchy — not a global config. The topology
+carries the policy: user grants parent under a **bit-carrying** authority log
+(x402-gated), agent grants under a **bit-free** one (ungated) — keeping agents
+free is *topological*, never an operator bypass. Three roles stay independent —
+the browser **pays**, the grant authority **registers** (server-side; the
+browser never registers), the grant **endorses** the user's key. The demo is
+honest about the split: `maxHeight` is the hard, on-chain-enforced ceiling on
+*sealed* work; a DO-local `prepaidTurns` counter is the soft per-turn budget,
+because appends are unmetered. At zero the UI offers a one-click top-up (a fresh
+batch grant, its own provable artifact); the parent's payment policy is
+**verifiable offline** in the browser from the parent grant's own receipt.
+
 **Two-sided attestation, two logs, two trust roots (the demo's thesis):**
 each turn lands as **two leaves** — the user's signed envelope on a log
 *owned by the user's wallet*, and the agent's work statement on a log *owned
@@ -82,10 +99,9 @@ recovery of the delegation certificate, coverage window, delegated-key
 signature over the peak, and inclusion.
 
 **Supporting cast:** wcc-1 wallet-challenge sessions (ARC-0023 shape) for
-edge auth; the payment-commitment/books seam (x402-ready); and two platform
-improvements this work drove upstream — the grant authority now self-renews
-its auth-log sealing lease, and the coordinator wakes parked sealers the
-moment a late delegation certificate lands
+edge auth; and two platform improvements this work drove upstream — the grant
+authority now self-renews its auth-log sealing lease, and the coordinator
+wakes parked sealers the moment a late delegation certificate lands
 ([canopy PR #224](https://github.com/forestrie/canopy/pull/224)).
 
 **The honest one-liner for both audiences:** Cloudflare gives the agent a
