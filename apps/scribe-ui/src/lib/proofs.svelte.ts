@@ -9,6 +9,7 @@ import {
 	fetchIdentity,
 	fetchReceipts,
 	kickReceiptCollection,
+	payUserGrant,
 	type IdentityResponse,
 	type ReceiptsExport,
 	type WorkExportWire
@@ -53,6 +54,11 @@ export class ProofPanel {
 	delegation = $state<'idle' | 'working' | 'done' | 'error'>('idle');
 	delegationDetail = $state<string | null>(null);
 
+	/** x402 user-grant purchase (W4b): the wallet signs the parked challenge. */
+	payment = $state<'idle' | 'paying' | 'paid' | 'error'>('idle');
+	paymentDetail = $state<string | null>(null);
+	#paying: Promise<void> | null = null;
+
 	constructor(session: ScribeSession, wallet: DemoWallet) {
 		this.#session = session;
 		this.#wallet = wallet;
@@ -83,6 +89,16 @@ export class ProofPanel {
 		return this.works.some(inFlight);
 	}
 
+	/**
+	 * A parked x402 challenge (W4b) awaiting the wallet's signature — set on a
+	 * payment-gated lane once grant-at-bind hits canopy's 402, cleared when the
+	 * grant is bought. Null on dark lanes. Read from the polled export first
+	 * (identity is pinned at first fetch, before the challenge is parked).
+	 */
+	get grantChallenge(): string | null {
+		return this.export?.forestrie.userGrantChallenge ?? this.identity?.userGrantChallenge ?? null;
+	}
+
 	async refresh(): Promise<void> {
 		this.refreshing = true;
 		try {
@@ -96,7 +112,42 @@ export class ProofPanel {
 		} finally {
 			this.refreshing = false;
 		}
+		// Buy the user grant if a payment-gated lane parked a challenge (W4b).
+		// Fire-and-forget: single-flight inside, and it refreshes on success.
+		if (this.payment !== 'error') void this.ensureUserGrantPaid();
 		this.#schedulePoll();
+	}
+
+	/**
+	 * The x402 user-grant purchase (plan-2608-09 W4b). When a payment-gated
+	 * lane parks a challenge, the demo wallet signs it (silently, like the
+	 * session and sealing signatures) and the DO forwards `X-PAYMENT` to the
+	 * authority, which resubmits register-grant → 303. Single-flight; a no-op
+	 * on dark lanes (no challenge) and once the grant exists (userLogId set).
+	 */
+	async ensureUserGrantPaid(): Promise<void> {
+		const challenge = this.grantChallenge;
+		if (!challenge || this.userLogId) return;
+		this.#paying ??= this.#payUserGrant(challenge).finally(() => {
+			this.#paying = null;
+		});
+		return this.#paying;
+	}
+
+	async #payUserGrant(challenge: string): Promise<void> {
+		this.payment = 'paying';
+		try {
+			const xPayment = this.#wallet.signX402Payment(challenge);
+			const token = await this.#session.ensure();
+			await payUserGrant(this.#session.sub!, token, xPayment);
+			this.payment = 'paid';
+			this.paymentDetail = null;
+		} catch (err) {
+			this.payment = 'error';
+			this.paymentDetail = String(err);
+			return;
+		}
+		await this.refresh();
 	}
 
 	/** Ask the DO to poll the lane now (demo acceleration), then refresh. */

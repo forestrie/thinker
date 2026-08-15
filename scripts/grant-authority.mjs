@@ -38,14 +38,16 @@ import {
   signGrantPayloadWithEs256Pem,
 } from "@forestrie/grant-builder";
 import {
+  encodeCborDeterministic,
   encodeGrantPayloadV0Canonical,
   mergeUnprotectedIntoCoseSign1,
   uuidToBytes,
 } from "@forestrie/encoding";
 import { HEADER_IDTIMESTAMP, HEADER_RECEIPT } from "@forestrie/grant-builder";
 import {
+  forestrieGrantAuthorization,
+  interpretRegisterRedirect,
   queryRegistrationOnce,
-  registerGrant,
   resolveReceiptOnce,
 } from "@forestrie/scrapi-client";
 
@@ -146,14 +148,12 @@ function renewAuthLogSealingIfNeeded() {
 }
 
 /**
- * Issue a creation grant endorsing `grantData` on a fresh data log.
+ * Build (sign) a creation grant endorsing `grantData` on a fresh data log.
  * `maxHeight` > 0 sizes the grant to a purchased batch (user grants, W4a);
- * 0 leaves it unbounded (agent grants).
+ * 0 leaves it unbounded (agent grants). Signing is cheap and stateless — the
+ * expensive register/seal happens in {@link submitCreationGrant}.
  */
-async function issueCreationGrant(grantData, maxHeight = 0) {
-  // Just-in-time lease check: cheap no-op while the lease has runway, and
-  // closes the window between timer ticks after a long idle stretch.
-  await renewAuthLogSealingIfNeeded();
+function buildCreationGrant(grantData, maxHeight = 0) {
   const logId = crypto.randomUUID();
   const grant = {
     logId: uuidToBytes(logId),
@@ -165,14 +165,75 @@ async function issueCreationGrant(grantData, maxHeight = 0) {
   };
   const payloadBytes = encodeGrantPayloadV0Canonical(grant);
   const sign1 = signGrantPayloadWithEs256Pem(payloadBytes, authorityPem);
-  const grantBase64 = bytesToForestrieGrantBase64(sign1);
+  return { logId, sign1, grantBase64: bytesToForestrieGrantBase64(sign1) };
+}
 
-  const { statusUrl } = await registerGrant({
-    baseUrl: BASE_URL,
-    bootstrapLogId: ROOT_LOG_ID,
-    grantBase64,
-    parentGrantBase64: authGrantB64,
+/**
+ * POST a built grant to `/register/{ROOT}/grants` with the AUTH parent grant
+ * (grants.md §11). The stock `registerGrant` throws on any non-303, so it
+ * cannot see the x402 gate (plan-2608-09 W2): when the parent grant carries
+ * `GF_CHILD_PAYMENT_REQUIRED` and the lane admission is `paid`/`either`,
+ * register-grant answers **402** with an `X-PAYMENT-REQUIRED` challenge. We do
+ * the POST raw so we can (a) surface that challenge to the browser wallet and
+ * (b) resubmit the identical grant carrying the wallet-signed `X-PAYMENT`
+ * header (W4b — the authority is the registrar, the browser is the payer).
+ *
+ * Returns `{ status: "receipt", statusUrl }` on the 303 (dark lanes and paid
+ * resubmits both land here) or `{ status: "payment_required", challengeB64 }`
+ * on the 402. `interpretRegisterRedirect` still owns the 303 contract.
+ */
+async function registerGrantRaw(grantBase64, { xPayment } = {}) {
+  const headers = {
+    Authorization: forestrieGrantAuthorization(grantBase64),
+    "Content-Type": "application/cbor",
+  };
+  if (xPayment) headers["X-PAYMENT"] = xPayment;
+  const body = encodeCborDeterministic({ parentGrant: base64ToBytes(authGrantB64) });
+  const res = await fetch(`${BASE_URL.replace(/\/$/, "")}/register/${ROOT_LOG_ID}/grants`, {
+    method: "POST",
+    headers,
+    redirect: "manual",
+    body,
   });
+  if (res.status === 402) {
+    // Challenge rides the response header (same shape as onboard/credits).
+    const challengeB64 = res.headers.get("x-payment-required");
+    if (!challengeB64)
+      throw new Error("register-grant 402 without X-PAYMENT-REQUIRED challenge header");
+    return { status: "payment_required", challengeB64 };
+  }
+  const { statusUrl } = interpretRegisterRedirect(
+    {
+      status: res.status,
+      location: res.headers.get("location") ?? undefined,
+      body: new Uint8Array(await res.arrayBuffer()),
+    },
+    BASE_URL,
+  );
+  return { status: "receipt", statusUrl };
+}
+
+/** Decode standard/url-safe base64 to bytes (Node Buffer handles both). */
+function base64ToBytes(b64) {
+  return Uint8Array.from(Buffer.from(b64, "base64"));
+}
+
+/**
+ * Register a built grant and wait out sequencing + the covering seal, then
+ * splice the inclusion receipt into the COSE Sign1 → completed transparent
+ * statement. Throws {@link PaymentRequired} carrying the challenge when the
+ * x402 gate answers 402 and no `xPayment` was supplied (phase 1 of W4b).
+ */
+async function submitCreationGrant(built, { xPayment } = {}) {
+  // Just-in-time lease check: cheap no-op while the lease has runway, and
+  // closes the window between timer ticks after a long idle stretch.
+  await renewAuthLogSealingIfNeeded();
+  const { logId, sign1, grantBase64 } = built;
+
+  const submitted = await registerGrantRaw(grantBase64, { xPayment });
+  if (submitted.status === "payment_required")
+    throw new PaymentRequired(submitted.challengeB64);
+  const { statusUrl } = submitted;
 
   const deadline = Date.now() + GRANT_TIMEOUT_MS;
   let receiptUrl;
@@ -208,6 +269,24 @@ async function issueCreationGrant(grantData, maxHeight = 0) {
     ]),
   );
   return { logId, entryIdHex, grantB64: bytesToForestrieGrantBase64(completed) };
+}
+
+/** Signals a register-grant 402 back up to the handler (W4b phase 1). */
+class PaymentRequired extends Error {
+  constructor(challengeB64) {
+    super("register-grant requires payment");
+    this.challengeB64 = challengeB64;
+  }
+}
+
+/**
+ * Build + register + complete in one call — the ungated path (agent grants,
+ * and user grants on a dark lane). `xPayment` resubmits a paid grant (W4b
+ * phase 2). Propagates {@link PaymentRequired} when the gate 402s and no
+ * payment was supplied.
+ */
+async function issueCreationGrant(grantData, maxHeight = 0, opts = {}) {
+  return submitCreationGrant(buildCreationGrant(grantData, maxHeight), opts);
 }
 
 /** Register a KS256-owned log's public root with the coordinator (operator). */
@@ -255,6 +334,19 @@ async function handleAgentGrant(body) {
   return { status: 201, body: { ...out, preIssued: false } };
 }
 
+/**
+ * User grant, two-phase for the x402 gate (plan-2608-09 W4b). The AUTH parent
+ * carries `GF_CHILD_PAYMENT_REQUIRED` (W4a), so on a `paid`/`either` lane the
+ * child registration is payment-gated:
+ *
+ *   phase 1  POST {address}            → 402 { paymentRequired, challengeB64 }
+ *            (the browser wallet signs the challenge)
+ *   phase 2  POST {address, xPayment}  → 201 issued grant
+ *
+ * On a dark lane (admission `open`) phase 1 registers straight through and
+ * issues (the `receipt` branch below) — byte-identical to pre-plan. The
+ * authority is the registrar; the browser is the payer (H1 invariant).
+ */
 async function handleUserGrant(body) {
   const addrHex = String(body.address ?? "").replace(/^0x/, "").toLowerCase();
   if (!/^[0-9a-f]{40}$/.test(addrHex))
@@ -263,9 +355,28 @@ async function handleUserGrant(body) {
   if (existsSync(issuedPath))
     return { status: 200, body: { ...JSON.parse(readFileSync(issuedPath, "utf8")), preIssued: true } };
 
-  recordBooks("grant_user", addrHex, body.paymentCommitment);
   const address = Uint8Array.from(Buffer.from(addrHex, "hex"));
-  const issued = await issueCreationGrant(address, USER_GRANT_BATCH_TURNS);
+  const xPayment = typeof body.xPayment === "string" && body.xPayment ? body.xPayment : undefined;
+
+  let issued;
+  try {
+    // Phase 1 books the debt; a paid resubmit (phase 2) is the same subject.
+    if (!xPayment) recordBooks("grant_user", addrHex, body.paymentCommitment);
+    issued = await issueCreationGrant(address, USER_GRANT_BATCH_TURNS, { xPayment });
+  } catch (err) {
+    if (err instanceof PaymentRequired)
+      return {
+        status: 402,
+        body: {
+          paymentRequired: true,
+          challengeB64: err.challengeB64,
+          address: `0x${addrHex}`,
+          maxHeight: USER_GRANT_BATCH_TURNS,
+        },
+      };
+    throw err;
+  }
+
   await uploadKs256PublicRoot(issued.logId, address);
   // maxHeight rides the response so the Scribe DO can seed prepaidTurns (W4c)
   // without decoding the grant payload.
@@ -277,7 +388,9 @@ async function handleUserGrant(body) {
     maxHeight: USER_GRANT_BATCH_TURNS,
   };
   writeFileSync(issuedPath, JSON.stringify(out, null, 2));
-  console.log(`issued grant_user addr=0x${addrHex} log=${issued.logId}`);
+  console.log(
+    `issued grant_user addr=0x${addrHex} log=${issued.logId}${xPayment ? " (x402 paid)" : ""}`,
+  );
   return { status: 201, body: { ...out, preIssued: false } };
 }
 

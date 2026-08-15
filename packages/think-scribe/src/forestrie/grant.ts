@@ -54,7 +54,23 @@ export interface IssuedGrant {
   logId: string;
   /** True when the authority had already issued this grant (pre-issue, O5). */
   preIssued: boolean;
+  /**
+   * The batch ceiling (`maxHeight`) the authority sized this grant to
+   * (plan-2608-09 W4a): the prepaid-turns budget the Scribe DO enforces (W4c)
+   * and the unit the x402 gate priced. Absent on agent grants (unbounded).
+   */
+  maxHeight?: number;
 }
+
+/**
+ * Outcome of asking for a user grant (plan-2608-09 W4b). On a payment-gated
+ * lane the authority proxies canopy's 402: it returns the `X-PAYMENT-REQUIRED`
+ * challenge for the browser wallet to sign, rather than a grant. On a dark
+ * lane it issues straight away.
+ */
+export type UserGrantResult =
+  | { kind: "issued"; grant: IssuedGrant }
+  | { kind: "payment_required"; challengeB64: string; maxHeight: number };
 
 export class GrantRequestError extends Error {}
 
@@ -80,7 +96,11 @@ export class GrantAuthorityClient {
     if (!authorityUrl) throw new GrantRequestError("empty grant authority url");
   }
 
-  async #post(path: string, body: Record<string, unknown>): Promise<IssuedGrant> {
+  /** Raw POST → `{ status, body }`; leaves status interpretation to callers. */
+  async #post(
+    path: string,
+    body: Record<string, unknown>,
+  ): Promise<{ status: number; body: Record<string, unknown> }> {
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     if (this.token) headers.Authorization = `Bearer ${this.token}`;
     // Detach before calling: `this.fetchImpl(...)` would invoke fetch with
@@ -92,31 +112,81 @@ export class GrantAuthorityClient {
       body: JSON.stringify(body),
     });
     const text = await res.text();
-    if (!res.ok)
+    let parsed: Record<string, unknown> = {};
+    if (text) {
+      try {
+        parsed = JSON.parse(text) as Record<string, unknown>;
+      } catch {
+        throw new GrantRequestError(
+          `grant authority ${path}: HTTP ${res.status} non-JSON ${text.slice(0, 200)}`,
+        );
+      }
+    }
+    return { status: res.status, body: parsed };
+  }
+
+  /** Interpret a `{ status, body }` as an issued grant, or throw. */
+  #asIssued(path: string, res: { status: number; body: Record<string, unknown> }): IssuedGrant {
+    if (res.status >= 400)
       throw new GrantRequestError(
-        `grant authority ${path}: HTTP ${res.status} ${text.slice(0, 200)}`,
+        `grant authority ${path}: HTTP ${res.status} ${JSON.stringify(res.body).slice(0, 200)}`,
       );
-    const issued = JSON.parse(text) as Partial<IssuedGrant>;
+    const issued = res.body as Partial<IssuedGrant>;
     if (!issued.grantB64 || !issued.logId)
       throw new GrantRequestError(`grant authority ${path}: response missing grantB64/logId`);
-    return { grantB64: issued.grantB64, logId: issued.logId, preIssued: issued.preIssued === true };
+    return {
+      grantB64: issued.grantB64,
+      logId: issued.logId,
+      preIssued: issued.preIssued === true,
+      maxHeight: typeof issued.maxHeight === "number" ? issued.maxHeight : undefined,
+    };
   }
 
   /** Endorse the agent statement key (`grant_agent`, grantData = x‖y). */
   async requestAgentGrant(publicKeyXY: Uint8Array): Promise<IssuedGrant> {
     let xyHex = "";
     for (const b of publicKeyXY) xyHex += b.toString(16).padStart(2, "0");
-    return this.#post("/grants/agent", {
-      publicKeyXY: xyHex,
-      paymentCommitment: await this.payment.commitment("grant_agent", xyHex),
-    });
+    return this.#asIssued(
+      "/grants/agent",
+      await this.#post("/grants/agent", {
+        publicKeyXY: xyHex,
+        paymentCommitment: await this.payment.commitment("grant_agent", xyHex),
+      }),
+    );
   }
 
-  /** Endorse the user's wallet key (`grant_user`, grantData = 20-byte address). */
-  async requestUserGrant(address: string): Promise<IssuedGrant> {
-    return this.#post("/grants/user", {
+  /**
+   * Endorse the user's wallet key (`grant_user`, grantData = 20-byte address).
+   * On a payment-gated lane (W4b) the authority answers 402 with the challenge
+   * to sign — the caller relays it to the browser wallet, then calls
+   * {@link payUserGrant}. On a dark lane it issues straight away.
+   */
+  async requestUserGrant(address: string): Promise<UserGrantResult> {
+    const res = await this.#post("/grants/user", {
       address,
       paymentCommitment: await this.payment.commitment("grant_user", address),
     });
+    if (res.status === 402) {
+      const challengeB64 = res.body.challengeB64;
+      if (typeof challengeB64 !== "string" || !challengeB64)
+        throw new GrantRequestError("grant authority /grants/user: 402 without challengeB64");
+      return {
+        kind: "payment_required",
+        challengeB64,
+        maxHeight: typeof res.body.maxHeight === "number" ? res.body.maxHeight : 0,
+      };
+    }
+    return { kind: "issued", grant: this.#asIssued("/grants/user", res) };
+  }
+
+  /**
+   * Resubmit the user grant carrying the wallet-signed x402 `X-PAYMENT`
+   * (W4b phase 2). The authority resubmits register-grant → 303 → completes.
+   */
+  async payUserGrant(address: string, xPayment: string): Promise<IssuedGrant> {
+    return this.#asIssued(
+      "/grants/user",
+      await this.#post("/grants/user", { address, xPayment }),
+    );
   }
 }

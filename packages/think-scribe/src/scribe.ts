@@ -9,6 +9,7 @@ import {
   ConfiguredGrantProvider,
   GrantAuthorityClient,
   type GrantProvider,
+  type IssuedGrant,
 } from "./forestrie/grant.ts";
 import {
   fetchReceipt,
@@ -104,6 +105,15 @@ const GRANT_B64_KEY = "forestrie:grantB64";
 const GRANT_KID_KEY = "forestrie:grantKid";
 const USER_GRANT_B64_KEY = "forestrie:userGrantB64";
 const USER_LOG_ID_KEY = "forestrie:userLogId";
+/**
+ * A pending x402 `X-PAYMENT-REQUIRED` challenge (base64) for the user grant
+ * (plan-2608-09 W4b): stored when the authority proxies canopy's 402, exposed
+ * on `/identity` for the browser wallet to sign, and cleared once
+ * `/pay-user-grant` completes. Only set on a payment-gated lane.
+ */
+const USER_GRANT_CHALLENGE_KEY = "forestrie:userGrantChallenge";
+/** The purchased grant's batch ceiling (maxHeight) — seeds prepaidTurns (W4c). */
+const USER_GRANT_MAXHEIGHT_KEY = "forestrie:userGrantMaxHeight";
 /**
  * Set (epoch ms) when the CLIENT confirms the wallet signed a sealing
  * delegation for the user's log. User leaves are HELD until then — the
@@ -312,14 +322,32 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
     const storedGrant = await this.ctx.storage.get<string>(USER_GRANT_B64_KEY);
     const storedLog = await this.ctx.storage.get<string>(USER_LOG_ID_KEY);
     if (storedGrant && storedLog) return { grantB64: storedGrant, logId: storedLog };
+    // A pending payment challenge means we already asked and canopy 402'd:
+    // the browser must sign before we can issue. Don't re-hit the authority
+    // every drain — the wallet drives completion via `/pay-user-grant` (W4b).
+    if (await this.ctx.storage.get<string>(USER_GRANT_CHALLENGE_KEY)) return null;
     const authority = this.#authority();
     if (!authority) return null;
     const principal = await this.ctx.storage.get<string>(PRINCIPAL_STORAGE_KEY);
     if (!principal) return null;
-    const issued = await authority.requestUserGrant(principal);
-    await this.ctx.storage.put(USER_GRANT_B64_KEY, issued.grantB64);
-    await this.ctx.storage.put(USER_LOG_ID_KEY, issued.logId);
-    return { grantB64: issued.grantB64, logId: issued.logId };
+    const result = await authority.requestUserGrant(principal);
+    if (result.kind === "payment_required") {
+      // Park the challenge for the browser; stay embed-only until it's paid.
+      await this.ctx.storage.put(USER_GRANT_CHALLENGE_KEY, result.challengeB64);
+      await this.ctx.storage.put(USER_GRANT_MAXHEIGHT_KEY, result.maxHeight);
+      return null;
+    }
+    return this.#storeUserGrant(result.grant);
+  }
+
+  /** Persist an issued user grant + its batch ceiling; clear any challenge. */
+  async #storeUserGrant(grant: IssuedGrant): Promise<{ grantB64: string; logId: string }> {
+    await this.ctx.storage.put(USER_GRANT_B64_KEY, grant.grantB64);
+    await this.ctx.storage.put(USER_LOG_ID_KEY, grant.logId);
+    if (typeof grant.maxHeight === "number")
+      await this.ctx.storage.put(USER_GRANT_MAXHEIGHT_KEY, grant.maxHeight);
+    await this.ctx.storage.delete(USER_GRANT_CHALLENGE_KEY);
+    return { grantB64: grant.grantB64, logId: grant.logId };
   }
 
   #forestrieTarget(): { baseUrl: string; rootLogId: string } {
@@ -824,6 +852,10 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
         userLogId: (await this.ctx.storage.get<string>(USER_LOG_ID_KEY)) ?? null,
         userSealingDelegated:
           (await this.ctx.storage.get<number>(USER_SEALING_DELEGATED_KEY)) !== undefined,
+        // A pending x402 challenge (W4b) the browser wallet must sign to buy
+        // the user grant; null on dark lanes and once paid.
+        userGrantChallenge:
+          (await this.ctx.storage.get<string>(USER_GRANT_CHALLENGE_KEY)) ?? null,
       });
     }
 
@@ -931,6 +963,10 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
           userLogId: (await this.ctx.storage.get<string>(USER_LOG_ID_KEY)) ?? null,
           userSealingDelegated:
             (await this.ctx.storage.get<number>(USER_SEALING_DELEGATED_KEY)) !== undefined,
+          // Polled every refresh (identity is pinned at first fetch): the
+          // browser picks up the parked x402 challenge here and pays it (W4b).
+          userGrantChallenge:
+            (await this.ctx.storage.get<string>(USER_GRANT_CHALLENGE_KEY)) ?? null,
         },
         works: exported,
       });
@@ -954,6 +990,33 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
       await this.ctx.storage.put(USER_SEALING_DELEGATED_KEY, Date.now());
       await this.schedule(1, "drainCommitments", {});
       return Response.json({ principal, delegated: true });
+    }
+
+    // Complete the x402 user-grant purchase (plan-2608-09 W4b): the browser
+    // wallet signed the parked `X-PAYMENT-REQUIRED` challenge; forward the
+    // resulting `X-PAYMENT` to the authority, which resubmits register-grant
+    // → 303 and hands back the issued grant. The DO relays; it never holds the
+    // wallet key (the browser is the payer, the authority the registrar — H1).
+    if (request.method === "POST" && url.pathname.endsWith("/pay-user-grant")) {
+      if (this.#attestationMode() !== "separate")
+        return new Response("not in separate attestation mode", { status: 409 });
+      const authority = this.#authority();
+      if (!authority)
+        return new Response("no grant authority configured", { status: 503 });
+      try {
+        const body = (await request.json()) as { xPayment?: string };
+        if (!body.xPayment)
+          return new Response("xPayment required", { status: 400 });
+        const grant = await authority.payUserGrant(principal, body.xPayment);
+        const { logId } = await this.#storeUserGrant(grant);
+        // Kick the drain so held/queued user leaves register now that we have
+        // a grant, and grant-at-bind's follow-on work (public-root upload,
+        // sealing) proceeds.
+        await this.schedule(1, "drainCommitments", {});
+        return Response.json({ principal, paid: true, userLogId: logId });
+      } catch (err) {
+        return forestrieProblem(err);
+      }
     }
 
     // Work-unit lifecycle inspection (harness + later the client UI).

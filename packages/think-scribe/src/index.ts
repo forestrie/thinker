@@ -23,6 +23,7 @@ export {
   type GrantProvider,
   type IssuedGrant,
   type PaymentProvider,
+  type UserGrantResult,
 } from "./forestrie/grant.ts";
 export {
   fetchReceipt,
