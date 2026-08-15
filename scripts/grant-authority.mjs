@@ -1,10 +1,16 @@
 // grant-authority — the M5 grant-issuing seam (plan §11 O5, O4; T4/T10).
 // A small HTTP authority the Scribe's `RequestGrantProvider` calls at init,
-// playing the role provision.sh played by hand: it holds the AUTH-log
-// authority key and issues *creation grants* that endorse a signer by
-// creating a fresh data log whose `grantData` names the signer (canopy
-// grants.md §6 — extend-only follow-up grants on an initialized log are not
-// accepted server-side, so a new writer key always gets a new log).
+// playing the role provision.sh played by hand: it holds the authority key
+// (K(L) of BOTH authority logs) and issues *creation grants* that endorse a
+// signer by creating a fresh data log whose `grantData` names the signer
+// (canopy grants.md §6 — extend-only follow-up grants on an initialized log
+// are not accepted server-side, so a new writer key always gets a new log).
+//
+// Two-parent topology (plan-2608-09 W4b.1, ARC-0029 §2 corollary A): the
+// payment bit lives on the PARENT and gates every child uniformly, so agent
+// grants parent under the bit-free agent-authority log and user grants under
+// the user-authority log carrying GF_CHILD_PAYMENT_REQUIRED. Agents stay
+// ungated by topology — never an ops/operator bypass token (canopy C7/C10).
 //
 // Two signer shapes, one codepath:
 //   POST /grants/agent {publicKeyXY}  grantData = 64-byte ES256 x‖y (the
@@ -21,8 +27,9 @@
 // `paymentCommitment`; it is appended to .provision/books.jsonl before
 // issuance. No enforcement — the x402 gate is a later cut; the seam exists.
 //
-// State: .provision/ (ids.env, authority.es256.pem, auth-grant.b64), issued
-// grants under .provision/issued/. Requires provision.sh `up` to have run.
+// State: .provision/ (ids.env, authority.es256.pem, agent-auth-grant.b64,
+// user-auth-grant.b64), issued grants under .provision/issued/. Requires
+// provision.sh `up` (W4b.1 two-log shape) to have run.
 //
 // Env: FORESTRIE_BASE_URL, DELEGATION_COORDINATOR_URL, COORDINATOR_APP_TOKEN
 // (user grants only), GRANT_AUTHORITY_TOKEN (optional bearer), PORT.
@@ -86,26 +93,40 @@ const ids = Object.fromEntries(
     .filter((l) => l.startsWith("export "))
     .map((l) => l.slice(7).split("=", 2)),
 );
-const AUTH_LOG_ID = ids.AUTH_LOG_ID;
+const AGENT_AUTH_LOG_ID = ids.AGENT_AUTH_LOG_ID;
+const USER_AUTH_LOG_ID = ids.USER_AUTH_LOG_ID;
 const ROOT_LOG_ID = ids.ROOT_LOG_ID;
-if (!AUTH_LOG_ID || !ROOT_LOG_ID) {
-  console.error("grant-authority: run provision.sh up first (.provision/ids.env)");
+if (!AGENT_AUTH_LOG_ID || !USER_AUTH_LOG_ID || !ROOT_LOG_ID) {
+  console.error(
+    "grant-authority: run provision.sh up first (.provision/ids.env needs the W4b.1 two-log shape: AGENT_AUTH_LOG_ID + USER_AUTH_LOG_ID)",
+  );
   process.exit(2);
 }
 const authorityPem = readFileSync(join(P, "authority.es256.pem"), "utf8");
-const authGrantB64 = readFileSync(join(P, "auth-grant.b64"), "utf8").trim();
+/**
+ * The two issuance parents (W4b.1). Same authority key owns both logs; the
+ * class split is purely which parent a child grant registers under.
+ */
+const AGENT_AUTHORITY = {
+  logId: AGENT_AUTH_LOG_ID,
+  grantB64: readFileSync(join(P, "agent-auth-grant.b64"), "utf8").trim(),
+};
+const USER_AUTHORITY = {
+  logId: USER_AUTH_LOG_ID,
+  grantB64: readFileSync(join(P, "user-auth-grant.b64"), "utf8").trim(),
+};
 
 const hex = (b) => Buffer.from(b).toString("hex");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// --- auth-log sealing lease (the gap the 2026-08-10 outage exposed) --------
+// --- auth-log sealing leases (the gap the 2026-08-10 outage exposed) -------
 // Grant issuance blocks on the grant's inclusion receipt, which needs the
-// AUTH log sealed — but the lease provision.sh signed at `up` time expires
-// (~6h TTL) and nothing renewed it, so every grant request eventually 502'd
-// with "grant receipt timed out (auth-log seal)". The authority holds K(L)
-// for its own auth log, so it renews the lease itself: at startup, on a
-// timer, and just-in-time before each issuance — the same delegate-at-drain
-// pattern the Scribe DO uses for the agent's data log.
+// issuing auth log sealed — but the lease provision.sh signed at `up` time
+// expires (~6h TTL) and nothing renewed it, so every grant request eventually
+// 502'd with "grant receipt timed out (auth-log seal)". The authority holds
+// K(L) for BOTH its auth logs (W4b.1), so it renews each lease itself: at
+// startup, on a timer, and just-in-time before each issuance — the same
+// delegate-at-drain pattern the Scribe DO uses for the agent's data log.
 
 let authorityKeyPairPromise;
 function authorityKeyPair() {
@@ -122,42 +143,52 @@ function authorityKeyPair() {
   return authorityKeyPairPromise;
 }
 
-let sealingExpiresAt = 0;
-let sealingRenewal = null;
-function renewAuthLogSealingIfNeeded() {
-  if (sealingExpiresAt - Date.now() / 1000 > SEALING_RENEW_MARGIN_S) return Promise.resolve();
-  sealingRenewal ??= (async () => {
+/** Per-auth-log lease state: logId → { expiresAt, renewal }. */
+const sealing = new Map(
+  [AGENT_AUTH_LOG_ID, USER_AUTH_LOG_ID].map((id) => [id, { expiresAt: 0, renewal: null }]),
+);
+function renewAuthLogSealingIfNeeded(logId) {
+  const lease = sealing.get(logId);
+  if (lease.expiresAt - Date.now() / 1000 > SEALING_RENEW_MARGIN_S) return Promise.resolve();
+  lease.renewal ??= (async () => {
     try {
       const result = await delegateSealing(
         { signingKeyPair: () => authorityKeyPair() },
-        { coordinatorUrl: COORDINATOR_URL, logId: AUTH_LOG_ID, knownSealerKeyB64: KNOWN_SEALER_KEY },
+        { coordinatorUrl: COORDINATOR_URL, logId, knownSealerKeyB64: KNOWN_SEALER_KEY },
       );
-      sealingExpiresAt = result.expiresAt;
+      lease.expiresAt = result.expiresAt;
       console.log(
-        `auth-log sealing lease renewed — sealer ${result.sealerId}, expires ${new Date(result.expiresAt * 1000).toISOString()}`,
+        `auth-log ${logId} sealing lease renewed — sealer ${result.sealerId}, expires ${new Date(result.expiresAt * 1000).toISOString()}`,
       );
     } catch (err) {
       // Issuance degrades to the timeout the caller already handles; the
       // next check retries. Never crash the service over a renewal.
-      console.error("auth-log sealing renewal failed (grants may time out until it succeeds):", err);
+      console.error(
+        `auth-log ${logId} sealing renewal failed (grants may time out until it succeeds):`,
+        err,
+      );
     } finally {
-      sealingRenewal = null;
+      lease.renewal = null;
     }
   })();
-  return sealingRenewal;
+  return lease.renewal;
+}
+function renewAllAuthLogSealingIfNeeded() {
+  return Promise.all([...sealing.keys()].map((id) => renewAuthLogSealingIfNeeded(id)));
 }
 
 /**
- * Build (sign) a creation grant endorsing `grantData` on a fresh data log.
- * `maxHeight` > 0 sizes the grant to a purchased batch (user grants, W4a);
- * 0 leaves it unbounded (agent grants). Signing is cheap and stateless — the
- * expensive register/seal happens in {@link submitCreationGrant}.
+ * Build (sign) a creation grant endorsing `grantData` on a fresh data log
+ * owned by `authority` (agent- or user-authority, W4b.1). `maxHeight` > 0
+ * sizes the grant to a purchased batch (user grants, W4a); 0 leaves it
+ * unbounded (agent grants). Signing is cheap and stateless — the expensive
+ * register/seal happens in {@link submitCreationGrant}.
  */
-function buildCreationGrant(grantData, maxHeight = 0) {
+function buildCreationGrant(authority, grantData, maxHeight = 0) {
   const logId = crypto.randomUUID();
   const grant = {
     logId: uuidToBytes(logId),
-    ownerLogId: uuidToBytes(AUTH_LOG_ID),
+    ownerLogId: uuidToBytes(authority.logId),
     grant: dataLogCreateExtendFlags(),
     maxHeight,
     minGrowth: 0,
@@ -169,8 +200,8 @@ function buildCreationGrant(grantData, maxHeight = 0) {
 }
 
 /**
- * POST a built grant to `/register/{ROOT}/grants` with the AUTH parent grant
- * (grants.md §11). The stock `registerGrant` throws on any non-303, so it
+ * POST a built grant to `/register/{ROOT}/grants` with `authority`'s parent
+ * grant (grants.md §11). The stock `registerGrant` throws on any non-303, so it
  * cannot see the x402 gate (plan-2608-09 W2): when the parent grant carries
  * `GF_CHILD_PAYMENT_REQUIRED` and the lane admission is `paid`/`either`,
  * register-grant answers **402** with an `X-PAYMENT-REQUIRED` challenge. We do
@@ -182,13 +213,13 @@ function buildCreationGrant(grantData, maxHeight = 0) {
  * resubmits both land here) or `{ status: "payment_required", challengeB64 }`
  * on the 402. `interpretRegisterRedirect` still owns the 303 contract.
  */
-async function registerGrantRaw(grantBase64, { xPayment } = {}) {
+async function registerGrantRaw(authority, grantBase64, { xPayment } = {}) {
   const headers = {
     Authorization: forestrieGrantAuthorization(grantBase64),
     "Content-Type": "application/cbor",
   };
   if (xPayment) headers["X-PAYMENT"] = xPayment;
-  const body = encodeCborDeterministic({ parentGrant: base64ToBytes(authGrantB64) });
+  const body = encodeCborDeterministic({ parentGrant: base64ToBytes(authority.grantB64) });
   const res = await fetch(`${BASE_URL.replace(/\/$/, "")}/register/${ROOT_LOG_ID}/grants`, {
     method: "POST",
     headers,
@@ -224,13 +255,13 @@ function base64ToBytes(b64) {
  * statement. Throws {@link PaymentRequired} carrying the challenge when the
  * x402 gate answers 402 and no `xPayment` was supplied (phase 1 of W4b).
  */
-async function submitCreationGrant(built, { xPayment } = {}) {
+async function submitCreationGrant(authority, built, { xPayment } = {}) {
   // Just-in-time lease check: cheap no-op while the lease has runway, and
   // closes the window between timer ticks after a long idle stretch.
-  await renewAuthLogSealingIfNeeded();
+  await renewAuthLogSealingIfNeeded(authority.logId);
   const { logId, sign1, grantBase64 } = built;
 
-  const submitted = await registerGrantRaw(grantBase64, { xPayment });
+  const submitted = await registerGrantRaw(authority, grantBase64, { xPayment });
   if (submitted.status === "payment_required")
     throw new PaymentRequired(submitted.challengeB64);
   const { statusUrl } = submitted;
@@ -280,13 +311,13 @@ class PaymentRequired extends Error {
 }
 
 /**
- * Build + register + complete in one call — the ungated path (agent grants,
- * and user grants on a dark lane). `xPayment` resubmits a paid grant (W4b
- * phase 2). Propagates {@link PaymentRequired} when the gate 402s and no
- * payment was supplied.
+ * Build + register + complete in one call under the given issuance parent
+ * (W4b.1) — the ungated path (agent grants, and user grants on a dark lane).
+ * `xPayment` resubmits a paid grant (W4b phase 2). Propagates
+ * {@link PaymentRequired} when the gate 402s and no payment was supplied.
  */
-async function issueCreationGrant(grantData, maxHeight = 0, opts = {}) {
-  return submitCreationGrant(buildCreationGrant(grantData, maxHeight), opts);
+async function issueCreationGrant(authority, grantData, maxHeight = 0, opts = {}) {
+  return submitCreationGrant(authority, buildCreationGrant(authority, grantData, maxHeight), opts);
 }
 
 /** Register a KS256-owned log's public root with the coordinator (operator). */
@@ -327,7 +358,10 @@ async function handleAgentGrant(body) {
     return { status: 200, body: { ...JSON.parse(readFileSync(issuedPath, "utf8")), preIssued: true } };
 
   recordBooks("grant_agent", kidHex, body.paymentCommitment);
-  const issued = await issueCreationGrant(Uint8Array.from(Buffer.from(xyHex, "hex")));
+  const issued = await issueCreationGrant(
+    AGENT_AUTHORITY,
+    Uint8Array.from(Buffer.from(xyHex, "hex")),
+  );
   const out = { kind: "agent", kid: kidHex, logId: issued.logId, grantB64: issued.grantB64 };
   writeFileSync(issuedPath, JSON.stringify(out, null, 2));
   console.log(`issued grant_agent kid=${kidHex.slice(0, 16)}… log=${issued.logId}`);
@@ -335,9 +369,9 @@ async function handleAgentGrant(body) {
 }
 
 /**
- * User grant, two-phase for the x402 gate (plan-2608-09 W4b). The AUTH parent
- * carries `GF_CHILD_PAYMENT_REQUIRED` (W4a), so on a `paid`/`either` lane the
- * child registration is payment-gated:
+ * User grant, two-phase for the x402 gate (plan-2608-09 W4b). The
+ * user-authority parent carries `GF_CHILD_PAYMENT_REQUIRED` (W4a/W4b.1), so
+ * on a `paid`/`either` lane the child registration is payment-gated:
  *
  *   phase 1  POST {address}            → 402 { paymentRequired, challengeB64 }
  *            (the browser wallet signs the challenge)
@@ -352,7 +386,11 @@ async function handleUserGrant(body) {
   if (!/^[0-9a-f]{40}$/.test(addrHex))
     return { status: 400, body: { error: "address must be a 20-byte hex KS256 wallet address" } };
   const issuedPath = join(ISSUED, `user-${addrHex}.json`);
-  if (existsSync(issuedPath))
+  // `renew` (W4c top-up): the caller's batch is spent — issue a FRESH grant
+  // on a fresh log (O3, new grant per batch) instead of the cached one. The
+  // cache still dedupes grant-at-bind retries on the non-renew path, and the
+  // fresh issue overwrites it below so later non-renew reads converge.
+  if (!body.renew && existsSync(issuedPath))
     return { status: 200, body: { ...JSON.parse(readFileSync(issuedPath, "utf8")), preIssued: true } };
 
   const address = Uint8Array.from(Buffer.from(addrHex, "hex"));
@@ -362,7 +400,9 @@ async function handleUserGrant(body) {
   try {
     // Phase 1 books the debt; a paid resubmit (phase 2) is the same subject.
     if (!xPayment) recordBooks("grant_user", addrHex, body.paymentCommitment);
-    issued = await issueCreationGrant(address, USER_GRANT_BATCH_TURNS, { xPayment });
+    issued = await issueCreationGrant(USER_AUTHORITY, address, USER_GRANT_BATCH_TURNS, {
+      xPayment,
+    });
   } catch (err) {
     if (err instanceof PaymentRequired)
       return {
@@ -401,7 +441,12 @@ const server = createServer(async (req, res) => {
   };
   try {
     if (req.method === "GET" && req.url === "/healthz")
-      return send(200, { ok: true, authLogId: AUTH_LOG_ID, rootLogId: ROOT_LOG_ID });
+      return send(200, {
+        ok: true,
+        agentAuthLogId: AGENT_AUTH_LOG_ID,
+        userAuthLogId: USER_AUTH_LOG_ID,
+        rootLogId: ROOT_LOG_ID,
+      });
 
     if (AUTHORITY_TOKEN && req.headers.authorization !== `Bearer ${AUTHORITY_TOKEN}`)
       return send(401, { error: "bad authority token" });
@@ -428,9 +473,9 @@ const server = createServer(async (req, res) => {
 
 server.listen(PORT, () => {
   console.log(
-    `grant-authority on :${PORT} — auth log ${AUTH_LOG_ID}, lane ${BASE_URL}` +
+    `grant-authority on :${PORT} — agent-auth ${AGENT_AUTH_LOG_ID}, user-auth ${USER_AUTH_LOG_ID} (payment bit), lane ${BASE_URL}` +
       (COORDINATOR_APP_TOKEN ? ", coordinator operator token loaded" : ", NO coordinator token (user grants will fail)"),
   );
-  void renewAuthLogSealingIfNeeded();
-  setInterval(() => void renewAuthLogSealingIfNeeded(), SEALING_CHECK_INTERVAL_MS).unref();
+  void renewAllAuthLogSealingIfNeeded();
+  setInterval(() => void renewAllAuthLogSealingIfNeeded(), SEALING_CHECK_INTERVAL_MS).unref();
 });

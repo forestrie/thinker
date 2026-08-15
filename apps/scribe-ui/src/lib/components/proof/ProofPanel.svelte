@@ -5,7 +5,7 @@
 	import Badge from '$lib/components/ui/Badge.svelte';
 	import Button from '$lib/components/ui/Button.svelte';
 	import WorkCard from './WorkCard.svelte';
-	import { KeyRound, LoaderCircle, RefreshCw, ShieldCheck, Stamp } from '@lucide/svelte';
+	import { Coins, KeyRound, LoaderCircle, RefreshCw, ShieldCheck, Stamp } from '@lucide/svelte';
 
 	let { proofs }: { proofs: ProofPanel } = $props();
 
@@ -100,6 +100,85 @@
 					<p class={proofs.delegation === 'error' ? 'text-kumo-danger' : 'text-kumo-subtle'}>
 						{proofs.delegationDetail}
 					</p>
+				{/if}
+
+				<!-- Prepaid turns (W4c/W4d): the purchased batch is the turn budget;
+				     top-up repeats the W4b purchase — a new grant and log per batch. -->
+				<div class="flex items-center gap-2 border-t border-kumo-line pt-2">
+					<Coins class="size-3.5 text-kumo-subtle" />
+					{#if proofs.prepaidTurns !== null}
+						<span class={proofs.prepaidTurns === 0 ? 'text-kumo-danger' : 'text-kumo-default'}>
+							{proofs.prepaidTurns} turn{proofs.prepaidTurns === 1 ? '' : 's'} remaining
+						</span>
+					{:else}
+						<span class="text-kumo-subtle">turns unmetered (no purchased batch yet)</span>
+					{/if}
+					<Button
+						size="sm"
+						variant={proofs.prepaidTurns === 0 ? 'primary' : 'secondary'}
+						disabled={proofs.payment === 'paying'}
+						title="Buy another batch of attested turns (a fresh grant on a fresh log)"
+						onclick={() => proofs.topUp()}
+					>
+						{#if proofs.payment === 'paying'}
+							<LoaderCircle class="size-3.5 animate-spin" />
+						{:else}
+							<Coins class="size-3.5" />
+						{/if}
+						Top up
+					</Button>
+					{#if proofs.payment === 'paid'}
+						<Badge tone="success">paid</Badge>
+					{:else if proofs.payment === 'error'}
+						<Badge tone="danger">payment failed</Badge>
+					{/if}
+				</div>
+				{#if proofs.payment === 'error' && proofs.paymentDetail}
+					<p class="text-kumo-danger">{proofs.paymentDetail}</p>
+				{/if}
+			</div>
+		</Card>
+
+		<Card title="Payment policy — provable offline">
+			<div class="space-y-2 p-4 text-xs">
+				<p class="text-kumo-subtle">
+					Your grant's <em>parent</em> — the user-authority log — carries the payment
+					requirement in its own receipted log entry. Verify it here, in the browser, against
+					the forest root key: the price gate is a fact of the log, not a claim of the
+					operator.
+				</p>
+				<div class="flex items-center gap-2">
+					<Button
+						size="sm"
+						variant="secondary"
+						disabled={proofs.policy === 'verifying'}
+						onclick={() => proofs.verifyParentPolicy()}
+					>
+						{#if proofs.policy === 'verifying'}
+							<LoaderCircle class="size-3.5 animate-spin" />
+						{:else}
+							<ShieldCheck class="size-3.5" />
+						{/if}
+						Verify policy
+					</Button>
+					{#if proofs.policyResult}
+						{#if proofs.policyResult.ok && proofs.policyResult.requiresChildPayment}
+							<Badge tone="success">requiresChildPayment · receipt verified</Badge>
+						{:else if proofs.policyResult.ok}
+							<Badge tone="warning">no payment policy on parent</Badge>
+						{:else}
+							<Badge tone="danger">verification failed</Badge>
+						{/if}
+					{/if}
+				</div>
+				{#if proofs.policyResult}
+					<ul class="space-y-1 font-mono text-[11px]">
+						{#each proofs.policyResult.checks as check (check.name)}
+							<li class={check.ok ? 'text-kumo-subtle' : 'text-kumo-danger'}>
+								{check.ok ? '✓' : '✗'} {check.name}{check.detail ? ` — ${check.detail}` : ''}
+							</li>
+						{/each}
+					</ul>
 				{/if}
 			</div>
 		</Card>

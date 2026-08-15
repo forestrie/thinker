@@ -1,6 +1,6 @@
 import { AgentClient } from 'agents/client';
 import { buildUserEnvelope, newTurnClaims, workIdOf } from './envelope.ts';
-import { postTurn, scribeBase } from './scribe-api.ts';
+import { postTurn, scribeBase, ScribeApiError } from './scribe-api.ts';
 import type { ScribeSession } from './session.svelte.ts';
 import type { DemoWallet } from './wallet.svelte.ts';
 import { bytesToB64 } from './utils.ts';
@@ -373,8 +373,15 @@ export class ScribeChat {
 			if (!admitted.accepted) throw new Error(`turn not accepted: ${admitted.status}`);
 			return workId;
 		} catch (err) {
-			this.turnError = String(err);
+			// 402 = prepaid batch spent (W4c): the DO refused the turn and is
+			// already re-requesting a grant — the proof panel's poll picks up
+			// the fresh challenge (or the top-up button kicks it).
+			this.turnError =
+				err instanceof ScribeApiError && err.status === 402
+					? 'Prepaid turns exhausted — top up in the proof panel to continue.'
+					: String(err);
 			this.awaiting = false;
+			this.onTurnSettled?.();
 			throw err;
 		}
 	}

@@ -178,7 +178,11 @@ async function main() {
   console.log(`M5 smoke — wallet user ${sub}`);
 
   const health = await fetch(`${authorityUrl}/healthz`).then((r) => r.json()).catch(() => null);
-  check("grant-authority up", health?.ok === true, health?.authLogId);
+  check(
+    "grant-authority up",
+    health?.ok === true,
+    `agent-auth ${health?.agentAuthLogId} user-auth ${health?.userAuthLogId}`,
+  );
   if (!health?.ok) return;
 
   // 1. O5 counterfactual: derive the agent kid OFFLINE, before the DO runs.

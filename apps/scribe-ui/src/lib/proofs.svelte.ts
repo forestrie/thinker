@@ -1,6 +1,8 @@
 import { env } from '$env/dynamic/public';
 import {
+	verifyParentPolicyOffline,
 	verifyWorkReceipt,
+	type ParentPolicyResult,
 	type WorkVerifyResult
 } from '@forestrie/think-scribe/forestrie/receipt';
 import { delegateSealingKs256 } from '@forestrie/think-scribe/forestrie/delegate';
@@ -59,6 +61,10 @@ export class ProofPanel {
 	paymentDetail = $state<string | null>(null);
 	#paying: Promise<void> | null = null;
 
+	/** Offline parent-policy proof (W4d): payment policy as a receipted fact. */
+	policy = $state<'idle' | 'verifying' | 'done' | 'error'>('idle');
+	policyResult = $state<ParentPolicyResult | null>(null);
+
 	constructor(session: ScribeSession, wallet: DemoWallet) {
 		this.#session = session;
 		this.#wallet = wallet;
@@ -97,6 +103,15 @@ export class ProofPanel {
 	 */
 	get grantChallenge(): string | null {
 		return this.export?.forestrie.userGrantChallenge ?? this.identity?.userGrantChallenge ?? null;
+	}
+
+	/**
+	 * Turns remaining in the purchased batch (W4c) — polled from the export
+	 * (the balance moves per turn); null = unmetered (dark lane before any
+	 * grant, or embed mode).
+	 */
+	get prepaidTurns(): number | null {
+		return this.export?.forestrie.prepaidTurns ?? this.identity?.prepaidTurns ?? null;
 	}
 
 	async refresh(): Promise<void> {
@@ -148,6 +163,60 @@ export class ProofPanel {
 			return;
 		}
 		await this.refresh();
+	}
+
+	/**
+	 * Explicit top-up (W4d): re-trigger the W4b purchase. After exhaustion
+	 * the DO has already dropped the spent grant and parked (or is parking) a
+	 * fresh challenge — refresh to pick it up, clear a sticky payment error,
+	 * and let the single-flight purchase run. On a dark lane the new batch
+	 * issues without a challenge and the refresh simply shows it.
+	 */
+	async topUp(): Promise<void> {
+		if (this.payment === 'error') this.payment = 'idle';
+		await this.refresh();
+		await this.ensureUserGrantPaid();
+	}
+
+	/**
+	 * The offline parent-policy proof (W4d, the demo's honesty beat): decode
+	 * the user-authority grant from `/identity`, read `requiresChildPayment`
+	 * off its flag bytes, and verify its inclusion receipt under the forest
+	 * root key — all in the browser, no network. Proves "user grants cost
+	 * money" is a fact of the log, not a claim of the operator.
+	 */
+	async verifyParentPolicy(): Promise<void> {
+		const grantB64 = this.identity?.userAuthorityGrant;
+		const rootXY = this.identity?.rootPublicKeyXY;
+		if (!grantB64 || !rootXY) {
+			this.policy = 'error';
+			this.policyResult = {
+				ok: false,
+				requiresChildPayment: false,
+				authorityLogId: '',
+				checks: [
+					{
+						name: 'artifacts',
+						ok: false,
+						detail: 'user-authority grant / root key not provisioned on this worker'
+					}
+				]
+			};
+			return;
+		}
+		this.policy = 'verifying';
+		try {
+			this.policyResult = await verifyParentPolicyOffline(grantB64, hexToBytes(rootXY));
+			this.policy = 'done';
+		} catch (err) {
+			this.policy = 'error';
+			this.policyResult = {
+				ok: false,
+				requiresChildPayment: false,
+				authorityLogId: '',
+				checks: [{ name: 'verify', ok: false, detail: String(err) }]
+			};
+		}
 	}
 
 	/** Ask the DO to poll the lane now (demo acceleration), then refresh. */

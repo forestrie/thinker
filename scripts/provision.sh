@@ -8,8 +8,14 @@
 # — it plays three provisioning-held roles:
 #
 #   root.es256.pem       forest bootstrap / root log K(L)   (deploy artifact)
-#   authority.es256.pem  AUTH log K(L) — issues statement grants (T4)
+#   authority.es256.pem  K(L) of BOTH authority logs — issues statement grants (T4)
 #   steward.es256.pem    DATA log K(L) — holds the sealing delegation (T9)
+#
+# Two authority logs, one key (plan-2608-09 W4b.1, ARC-0029 §2 corollary A):
+# payment policy is a PARENT bit gating every child uniformly, so the class
+# split is topological — agent grants parent under a bit-free agent-authority
+# log; user grants parent under a user-authority log carrying
+# GF_CHILD_PAYMENT_REQUIRED. Never an ops/operator bypass token (canopy C7/C10).
 #
 # The agent's signing key is born inside the user's DO (C2) and is endorsed
 # after the fact: `grant <x||y hex>` registers an extend-only writer grant on
@@ -29,7 +35,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # --- lane + tooling (override via env) ---------------------------------------
-FORESTRIE_CLI="${FORESTRIE_CLI:-$HOME/Dev/personal/forestrie/ietf-126-demo/forestrie}"
+# Needs the forestrie-cli PR#47 build (--child-payment-required); the older
+# ietf-126-demo binary (v0.6.0) lacks the flag.
+FORESTRIE_CLI="${FORESTRIE_CLI:-$HOME/Dev/personal/forestrie/forestrie-cli/dist/forestrie}"
 FORESTRIE_BASE_URL="${FORESTRIE_BASE_URL:-https://api-a.forest-2.forestrie.dev}"
 DELEGATION_COORDINATOR_URL="${DELEGATION_COORDINATOR_URL:-https://coordinator-a.forest-2.forestrie.dev}"
 LOG_STORE_URL="${LOG_STORE_URL:-https://pub-d7bc2e23615b4cd1a80a0944c3cd3507.r2.dev}"
@@ -124,27 +132,47 @@ cmd_up() {
       --out-b64 "$P/root-grant.b64"
   fi
 
-  if [ -z "${AUTH_LOG_ID:-}" ]; then AUTH_LOG_ID=$(uuidgen | tr 'A-Z' 'a-z'); fi
+  if [ -z "${AGENT_AUTH_LOG_ID:-}" ]; then AGENT_AUTH_LOG_ID=$(uuidgen | tr 'A-Z' 'a-z'); fi
+  if [ -z "${USER_AUTH_LOG_ID:-}" ]; then USER_AUTH_LOG_ID=$(uuidgen | tr 'A-Z' 'a-z'); fi
   if [ -z "${DATA_LOG_ID:-}" ]; then DATA_LOG_ID=$(uuidgen | tr 'A-Z' 'a-z'); fi
-  save_ids UNIVOCITY_ADDRESS ROOT_LOG_ID AUTH_LOG_ID DATA_LOG_ID
+  save_ids UNIVOCITY_ADDRESS ROOT_LOG_ID AGENT_AUTH_LOG_ID USER_AUTH_LOG_ID DATA_LOG_ID
 
-  if have "$P/auth-grant.b64"; then
-    step "auth log — reusing $AUTH_LOG_ID"
+  if have "$P/agent-auth-grant.b64"; then
+    step "agent-authority log — reusing $AGENT_AUTH_LOG_ID"
   else
-    step "auth log $AUTH_LOG_ID (prepare → delegate → create)"
-    # --child-payment-required (adr-0062, plan-2608-09 W4a): the AUTH grant
+    step "agent-authority log $AGENT_AUTH_LOG_ID (prepare → delegate → create) — bit-free"
+    # NO --child-payment-required: agent grants stay ungated by topology
+    # (W4b.1 / C10 corollary A), so runtime agent endorsement keeps working
+    # unchanged when the lane's REGISTER_GRANT_ADMISSION flips (W5).
+    local common=(--base-url "$FORESTRIE_BASE_URL" \
+      --owner-log "$ROOT_LOG_ID" --new-log "$AGENT_AUTH_LOG_ID" --auth-log \
+      --signer-pem "$AUTHORITY_PEM" --sign-with "$ROOT_PEM" \
+      --parent-grant-b64 "$(cat "$P/root-grant.b64")" \
+      --out-b64 "$P/agent-auth-grant.b64")
+    "$FORESTRIE_CLI" create-log --prepare "${common[@]}"
+    "$FORESTRIE_CLI" delegate --coordinator-url "$DELEGATION_COORDINATOR_URL" \
+      --log-id "$AGENT_AUTH_LOG_ID" --sign-with "$AUTHORITY_PEM" \
+      --known-sealer-key "$KNOWN_SEALER_KEY"
+    "$FORESTRIE_CLI" create-log "${common[@]}"
+  fi
+
+  if have "$P/user-auth-grant.b64"; then
+    step "user-authority log — reusing $USER_AUTH_LOG_ID"
+  else
+    step "user-authority log $USER_AUTH_LOG_ID (prepare → delegate → create) — payment bit"
+    # --child-payment-required (adr-0062, plan-2608-09 W4a): this grant
     # carries GF_DERIVED|GF_CHILD_PAYMENT_REQUIRED, so user grants registered
     # under it at runtime x402-402 once the lane's REGISTER_GRANT_ADMISSION
     # flips (W5). Needs forestrie-cli >= the PR#47 build (v0.6.0 lacks it).
     local common=(--base-url "$FORESTRIE_BASE_URL" \
-      --owner-log "$ROOT_LOG_ID" --new-log "$AUTH_LOG_ID" --auth-log \
+      --owner-log "$ROOT_LOG_ID" --new-log "$USER_AUTH_LOG_ID" --auth-log \
       --child-payment-required \
       --signer-pem "$AUTHORITY_PEM" --sign-with "$ROOT_PEM" \
       --parent-grant-b64 "$(cat "$P/root-grant.b64")" \
-      --out-b64 "$P/auth-grant.b64")
+      --out-b64 "$P/user-auth-grant.b64")
     "$FORESTRIE_CLI" create-log --prepare "${common[@]}"
     "$FORESTRIE_CLI" delegate --coordinator-url "$DELEGATION_COORDINATOR_URL" \
-      --log-id "$AUTH_LOG_ID" --sign-with "$AUTHORITY_PEM" \
+      --log-id "$USER_AUTH_LOG_ID" --sign-with "$AUTHORITY_PEM" \
       --known-sealer-key "$KNOWN_SEALER_KEY"
     "$FORESTRIE_CLI" create-log "${common[@]}"
   fi
@@ -154,10 +182,10 @@ cmd_up() {
   else
     step "data log $DATA_LOG_ID (prepare → delegate → create)"
     local common=(--base-url "$FORESTRIE_BASE_URL" \
-      --owner-log "$AUTH_LOG_ID" --new-log "$DATA_LOG_ID" \
+      --owner-log "$AGENT_AUTH_LOG_ID" --new-log "$DATA_LOG_ID" \
       --bootstrap-log "$ROOT_LOG_ID" --data-log \
       --signer-pem "$STEWARD_PEM" --sign-with "$AUTHORITY_PEM" \
-      --parent-grant-b64 "$(cat "$P/auth-grant.b64")" \
+      --parent-grant-b64 "$(cat "$P/agent-auth-grant.b64")" \
       --out-b64 "$P/data-grant.b64")
     "$FORESTRIE_CLI" create-log --prepare "${common[@]}"
     "$FORESTRIE_CLI" delegate --coordinator-url "$DELEGATION_COORDINATOR_URL" \
@@ -203,7 +231,7 @@ cmd_grant() {
   local xyhex="${1:-}"
   [ ${#xyhex} -eq 128 ] || die "grant needs the agent public key as 128 hex chars (64-byte x||y)"
   load_ids
-  [ -n "${AUTH_LOG_ID:-}" ] || die "run 'up' first"
+  [ -n "${AGENT_AUTH_LOG_ID:-}" ] || die "run 'up' first"
 
   local pub="$P/agent-signer.pub.pem"
   # SPKI for an uncompressed P-256 point: fixed 26-byte header ++ 0x04 ++ x ++ y.
@@ -217,14 +245,14 @@ cmd_grant() {
   AGENT_LOG_ID=$(uuidgen | tr 'A-Z' 'a-z')
   step "create agent data log $AGENT_LOG_ID (grantData = agent kid $(printf '%s' "$xyhex" | cut -c1-64))"
   local common=(--base-url "$FORESTRIE_BASE_URL" \
-    --owner-log "$AUTH_LOG_ID" --new-log "$AGENT_LOG_ID" \
+    --owner-log "$AGENT_AUTH_LOG_ID" --new-log "$AGENT_LOG_ID" \
     --bootstrap-log "$ROOT_LOG_ID" --data-log \
     --signer-pem "$pub" --sign-with "$AUTHORITY_PEM" \
-    --parent-grant-b64 "$(cat "$P/auth-grant.b64")" \
+    --parent-grant-b64 "$(cat "$P/agent-auth-grant.b64")" \
     --out-b64 "$P/agent-grant.b64")
   "$FORESTRIE_CLI" create-log --prepare "${common[@]}"
   "$FORESTRIE_CLI" create-log "${common[@]}"
-  save_ids UNIVOCITY_ADDRESS ROOT_LOG_ID AUTH_LOG_ID DATA_LOG_ID AGENT_LOG_ID
+  save_ids UNIVOCITY_ADDRESS ROOT_LOG_ID AGENT_AUTH_LOG_ID USER_AUTH_LOG_ID DATA_LOG_ID AGENT_LOG_ID
   echo "completed creation grant (agent writer credential) → $P/agent-grant.b64"
 }
 
@@ -233,8 +261,19 @@ cmd_config() {
   load_ids
   [ -n "${UNIVOCITY_ADDRESS:-}" ] || die "run 'up' first"
   cp "$GENESIS" config/genesis.cbor
-  local agent_grant=""
+  local agent_grant="" user_auth_grant=""
   have "$P/agent-grant.b64" && agent_grant=$(cat "$P/agent-grant.b64")
+  # The completed user-authority creation grant (receipt included) — the W4d
+  # offline proof artifact: the browser decodes it to show the payment bit
+  # (requiresChildPayment) and verifies its receipt, proving the user grant
+  # was issued under a payment-required parent.
+  have "$P/user-auth-grant.b64" && user_auth_grant=$(cat "$P/user-auth-grant.b64")
+  # The forest root's public key (64-byte x||y, hex) — trust anchor for that
+  # receipt: the parent grant registered into the ROOT log, so its receipt's
+  # delegation certificate verifies under the root K(L).
+  local root_pub_xy
+  root_pub_xy=$(openssl pkey -in "$ROOT_PEM" -pubout -outform DER 2>/dev/null \
+    | tail -c 64 | xxd -p -c 200)
   cat > config/instance.jsonc <<EOF
 // Generated by scripts/provision.sh — do not edit; regenerate instead.
 // Pre-provisioned Forestrie wiring for the Scribe (plan §6, §7).
@@ -242,14 +281,17 @@ cmd_config() {
   "chainId": "$CHAIN_ID",
   "contract": "$UNIVOCITY_ADDRESS",
   "R": "$ROOT_LOG_ID",
-  "authLogId": "$AUTH_LOG_ID",
+  "agentAuthLogId": "$AGENT_AUTH_LOG_ID",
+  "userAuthLogId": "$USER_AUTH_LOG_ID",
   "dataLogId": "$DATA_LOG_ID",
   "agentLogId": "${AGENT_LOG_ID:-}",
+  "rootPublicKeyXY": "$root_pub_xy",
   "genesis": "./genesis.cbor",
   "forestrieBaseUrl": "$FORESTRIE_BASE_URL",
   "logStoreUrl": "$LOG_STORE_URL",
   "grants": {
-    "agent": "$agent_grant"
+    "agent": "$agent_grant",
+    "userAuthority": "$user_auth_grant"
   }
 }
 EOF
@@ -261,7 +303,9 @@ cmd_status() {
   load_ids
   step "provisioned"
   printf '  %-12s %s\n' contract "${UNIVOCITY_ADDRESS:-—}" \
-    "root(R)" "${ROOT_LOG_ID:-—}" auth "${AUTH_LOG_ID:-—}" data "${DATA_LOG_ID:-—}" \
+    "root(R)" "${ROOT_LOG_ID:-—}" \
+    "agent-auth" "${AGENT_AUTH_LOG_ID:-—}" "user-auth" "${USER_AUTH_LOG_ID:-—}" \
+    data "${DATA_LOG_ID:-—}" \
     "agent grant" "$(have "$P/agent-grant.b64" && echo yes || echo not-yet)"
 }
 

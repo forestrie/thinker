@@ -18,10 +18,12 @@
  */
 import {
   checkDelegationConstraints,
+  decodeForestrieGrantCose,
   entryIdHexToIdtimestampBe8,
   importEs256PublicKeyFromGrantDataXy64,
   parseReceipt,
   univocityLeafHash,
+  verifyGrantReceiptOfflineWithKeys,
   verifyReceiptOfflineWithKeys,
 } from "@forestrie/receipt-verify";
 import {
@@ -281,6 +283,108 @@ export async function verifyWorkReceipt(
   }
 
   return { ok: checks.every((c) => c.ok), checks };
+}
+
+/**
+ * Payment-policy flag predicates on the 8-byte grant flag field, mirroring
+ * `@forestrie/grant-builder` `requiresChildPayment` (adr-0062): GF_DERIVED is
+ * canopy wire byte 3 mask 0x04 (univocity bit 34), GF_CHILD_PAYMENT_REQUIRED
+ * byte 3 mask 0x08 (bit 35). The policy holds only when BOTH are set.
+ */
+function requiresChildPaymentFlags(grantFlags: Uint8Array): boolean {
+  const b3 = grantFlags[3] ?? 0;
+  return (b3 & 0x04) !== 0 && (b3 & 0x08) !== 0;
+}
+
+export interface ParentPolicyResult {
+  ok: boolean;
+  /** The decoded parent's payment policy bit (the demo's honesty beat). */
+  requiresChildPayment: boolean;
+  /** The parent (authority) log the grant creates, canonical uuid. */
+  authorityLogId: string;
+  checks: WorkCheck[];
+}
+
+/** Decode base64 (standard or url-safe, as grant b64 travels) to bytes. */
+function decodeGrantBase64(value: string): Uint8Array {
+  return decodeBase64(value.replace(/-/g, "+").replace(/_/g, "/"));
+}
+
+/**
+ * Offline proof that a user grant's PARENT carries the payment policy
+ * (plan-2608-09 W4d, ARC-0029 §2): decode the completed user-authority
+ * creation grant, read `requiresChildPayment` off its flag bytes, and verify
+ * its inclusion receipt under the forest ROOT key (the parent registered
+ * into the root log, so the root K(L) anchors its delegation certificate —
+ * the same "known log key" rung as the agent leaf). Together: "payment is
+ * required for user grants" is a receipt-provable fact of the log, not an
+ * operator claim.
+ */
+export async function verifyParentPolicyOffline(
+  parentGrantB64: string,
+  rootPublicKeyXY: Uint8Array,
+): Promise<ParentPolicyResult> {
+  const checks: WorkCheck[] = [];
+  const done = (requiresChildPayment: boolean, authorityLogId = ""): ParentPolicyResult => ({
+    ok: checks.every((c) => c.ok),
+    requiresChildPayment,
+    authorityLogId,
+    checks,
+  });
+
+  let bytes: Uint8Array;
+  let grant: ReturnType<typeof decodeForestrieGrantCose>["grant"];
+  let idtimestampBe8: Uint8Array;
+  try {
+    bytes = decodeGrantBase64(parentGrantB64);
+    ({ grant, idtimestampBe8 } = decodeForestrieGrantCose(bytes));
+  } catch (err) {
+    checks.push({ name: "parent-grant", ok: false, detail: `undecodable: ${err}` });
+    return done(false);
+  }
+  const hex = (b: Uint8Array) =>
+    [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
+  const logIdHex = hex(grant.logId);
+  const authorityLogId = `${logIdHex.slice(0, 8)}-${logIdHex.slice(8, 12)}-${logIdHex.slice(12, 16)}-${logIdHex.slice(16, 20)}-${logIdHex.slice(20)}`;
+  const bit = requiresChildPaymentFlags(grant.grant);
+  checks.push({
+    name: "parent-policy",
+    ok: true,
+    detail: bit
+      ? `parent ${authorityLogId} carries requiresChildPayment (flags ${hex(grant.grant)})`
+      : `parent ${authorityLogId} has NO payment policy (flags ${hex(grant.grant)})`,
+  });
+
+  // The completed grant carries its own inclusion receipt (unprotected 396).
+  const decoded = cborDecode(bytes);
+  const unprotected = Array.isArray(decoded) ? decoded[1] : undefined;
+  const receiptCbor = unprotected instanceof Map ? unprotected.get(396) : undefined;
+  if (!(receiptCbor instanceof Uint8Array)) {
+    checks.push({
+      name: "parent-receipt",
+      ok: false,
+      detail: "grant carries no inclusion receipt (unprotected header 396)",
+    });
+    return done(bit, authorityLogId);
+  }
+  try {
+    const result = await verifyGrantReceiptOfflineWithKeys({
+      receiptCbor,
+      grant,
+      idtimestampBe8,
+      trustKeys: [await importEs256PublicKeyFromGrantDataXy64(rootPublicKeyXY)],
+    });
+    checks.push({
+      name: "parent-receipt",
+      ok: result.ok,
+      detail: result.ok
+        ? "inclusion receipt verifies under the forest root key"
+        : `${result.stage}: ${result.reason ?? "failed"}`,
+    });
+  } catch (err) {
+    checks.push({ name: "parent-receipt", ok: false, detail: String(err) });
+  }
+  return done(bit, authorityLogId);
 }
 
 /** Browser/worker-safe SHA-256 Hasher for the merklelog proof math. */

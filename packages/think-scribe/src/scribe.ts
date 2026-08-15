@@ -84,6 +84,16 @@ export interface ScribeEnv extends Cloudflare.Env {
    * this" an independent, separately-receipted log entry).
    */
   ATTESTATION_MODE?: "embed" | "separate";
+  /**
+   * W4d offline parent-policy proof (plan-2608-09): the completed
+   * user-authority creation grant (base64 transparent statement, receipt
+   * included) and the forest root's public key (hex 64-byte x||y) as its
+   * trust anchor. Provisioning artifacts (`provision.sh config`), surfaced
+   * verbatim on `/identity` so the browser can prove the user grant's parent
+   * carries `requiresChildPayment` without trusting this worker.
+   */
+  GRANT_USER_AUTHORITY?: string;
+  FORESTRIE_ROOT_PUBLIC_KEY_XY?: string;
 }
 
 export const DEFAULT_MODEL_ID = "claude-sonnet-5";
@@ -114,6 +124,19 @@ const USER_LOG_ID_KEY = "forestrie:userLogId";
 const USER_GRANT_CHALLENGE_KEY = "forestrie:userGrantChallenge";
 /** The purchased grant's batch ceiling (maxHeight) — seeds prepaidTurns (W4c). */
 const USER_GRANT_MAXHEIGHT_KEY = "forestrie:userGrantMaxHeight";
+/**
+ * Turns remaining in the purchased batch (W4c): seeded from the grant's
+ * maxHeight when it is stored, decremented per admitted turn, refused at
+ * zero. Absent = unmetered (embed mode, or no batch ceiling recorded).
+ */
+const PREPAID_TURNS_KEY = "forestrie:prepaidTurns";
+/**
+ * Set while a top-up purchase is in flight (W4c): the spent grant has been
+ * dropped and the next user-grant request must tell the authority to bypass
+ * its per-address idempotence cache (a NEW grant and log per batch, O3).
+ * Cleared when the fresh grant is stored.
+ */
+const USER_GRANT_RENEWAL_KEY = "forestrie:userGrantRenewal";
 /**
  * Set (epoch ms) when the CLIENT confirms the wallet signed a sealing
  * delegation for the user's log. User leaves are HELD until then — the
@@ -330,7 +353,9 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
     if (!authority) return null;
     const principal = await this.ctx.storage.get<string>(PRINCIPAL_STORAGE_KEY);
     if (!principal) return null;
-    const result = await authority.requestUserGrant(principal);
+    const renew =
+      (await this.ctx.storage.get<boolean>(USER_GRANT_RENEWAL_KEY)) === true;
+    const result = await authority.requestUserGrant(principal, { renew });
     if (result.kind === "payment_required") {
       // Park the challenge for the browser; stay embed-only until it's paid.
       await this.ctx.storage.put(USER_GRANT_CHALLENGE_KEY, result.challengeB64);
@@ -342,12 +367,54 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 
   /** Persist an issued user grant + its batch ceiling; clear any challenge. */
   async #storeUserGrant(grant: IssuedGrant): Promise<{ grantB64: string; logId: string }> {
+    // A different logId means a NEW batch log (top-up, O3): the wallet's
+    // sealing authorization was for the old log, so its leaves must hold
+    // until the wallet delegates the new one.
+    const previousLogId = await this.ctx.storage.get<string>(USER_LOG_ID_KEY);
+    if (previousLogId !== undefined && previousLogId !== grant.logId)
+      await this.ctx.storage.delete(USER_SEALING_DELEGATED_KEY);
     await this.ctx.storage.put(USER_GRANT_B64_KEY, grant.grantB64);
     await this.ctx.storage.put(USER_LOG_ID_KEY, grant.logId);
-    if (typeof grant.maxHeight === "number")
+    if (typeof grant.maxHeight === "number") {
       await this.ctx.storage.put(USER_GRANT_MAXHEIGHT_KEY, grant.maxHeight);
+      // The purchased batch IS the turn budget (W4c).
+      await this.ctx.storage.put(PREPAID_TURNS_KEY, grant.maxHeight);
+    }
     await this.ctx.storage.delete(USER_GRANT_CHALLENGE_KEY);
+    await this.ctx.storage.delete(USER_GRANT_RENEWAL_KEY);
     return { grantB64: grant.grantB64, logId: grant.logId };
+  }
+
+  /**
+   * Prepaid-turn balance (W4c). `null` = unmetered: embed mode, or no batch
+   * ceiling on record (no user grant yet — nothing was purchased). Grants
+   * stored before this key existed seed lazily from the recorded ceiling.
+   */
+  async #prepaidTurns(): Promise<number | null> {
+    if (this.#attestationMode() !== "separate") return null;
+    const balance = await this.ctx.storage.get<number>(PREPAID_TURNS_KEY);
+    if (balance !== undefined) return balance;
+    if ((await this.ctx.storage.get<string>(USER_GRANT_B64_KEY)) === undefined) return null;
+    const ceiling = await this.ctx.storage.get<number>(USER_GRANT_MAXHEIGHT_KEY);
+    if (ceiling === undefined) return null;
+    await this.ctx.storage.put(PREPAID_TURNS_KEY, ceiling);
+    return ceiling;
+  }
+
+  /**
+   * The batch is exhausted: top-up = repeat the W4b purchase (a NEW grant
+   * and log per batch, O3). Drop the spent grant so {@link #userGrant}
+   * re-requests, flag the request a renewal so the authority bypasses its
+   * idempotence cache, and kick acquisition off the request path — on a paid
+   * lane a fresh challenge parks for the browser wallet to sign; on a dark
+   * lane the new batch issues straight away. Idempotent while in flight.
+   */
+  async #beginTopUp(): Promise<void> {
+    if ((await this.ctx.storage.get<boolean>(USER_GRANT_RENEWAL_KEY)) === true) return;
+    await this.ctx.storage.put(USER_GRANT_RENEWAL_KEY, true);
+    await this.ctx.storage.delete(USER_GRANT_B64_KEY);
+    await this.ctx.storage.delete(USER_LOG_ID_KEY);
+    await this.schedule(0, "acquireUserGrant", {});
   }
 
   #forestrieTarget(): { baseUrl: string; rootLogId: string } {
@@ -408,6 +475,22 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
       throw new EnvelopeError(
         "envelope signer does not match the session principal",
       );
+
+    // Prepaid-turn metering (W4c): each NEW admitted turn spends one turn of
+    // the purchased batch, before any work runs. Refuse at zero and start
+    // the top-up purchase so the browser finds a fresh challenge to pay. A
+    // re-submitted envelope (same workId) is not a new turn — never double-
+    // spend on the idempotent path.
+    if ((await this.ctx.storage.get<WorkRecord>(workKey(verified.workId))) === undefined) {
+      const balance = await this.#prepaidTurns();
+      if (balance !== null) {
+        if (balance <= 0) {
+          await this.#beginTopUp();
+          throw new TurnsExhausted();
+        }
+        await this.ctx.storage.put(PREPAID_TURNS_KEY, balance - 1);
+      }
+    }
 
     const record: WorkRecord = {
       workId: verified.workId,
@@ -856,6 +939,14 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
         // the user grant; null on dark lanes and once paid.
         userGrantChallenge:
           (await this.ctx.storage.get<string>(USER_GRANT_CHALLENGE_KEY)) ?? null,
+        // Turns remaining in the purchased batch (W4c); null = unmetered.
+        prepaidTurns:
+          (await this.ctx.storage.get<number>(PREPAID_TURNS_KEY)) ?? null,
+        // W4d offline parent-policy proof: the completed user-authority
+        // creation grant (receipt included) and the forest root's public key
+        // as its trust anchor, both provisioning artifacts handed in via env.
+        userAuthorityGrant: this.env.GRANT_USER_AUTHORITY ?? null,
+        rootPublicKeyXY: this.env.FORESTRIE_ROOT_PUBLIC_KEY_XY ?? null,
       });
     }
 
@@ -900,6 +991,14 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
       } catch (err) {
         if (err instanceof EnvelopeError)
           return new Response(err.message, { status: 400 });
+        if (err instanceof TurnsExhausted)
+          // 402 with a top-up affordance (W4c): the DO has already dropped
+          // the spent grant and re-requested — the client polls up the fresh
+          // challenge and repeats the W4b purchase.
+          return Response.json(
+            { error: err.message, topUp: true, prepaidTurns: 0 },
+            { status: 402 },
+          );
         return forestrieProblem(err);
       }
     }
@@ -967,6 +1066,9 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
           // browser picks up the parked x402 challenge here and pays it (W4b).
           userGrantChallenge:
             (await this.ctx.storage.get<string>(USER_GRANT_CHALLENGE_KEY)) ?? null,
+          // Polled too (W4c): the turns-remaining card tracks the balance live.
+          prepaidTurns:
+            (await this.ctx.storage.get<number>(PREPAID_TURNS_KEY)) ?? null,
         },
         works: exported,
       });
@@ -1007,7 +1109,11 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
         const body = (await request.json()) as { xPayment?: string };
         if (!body.xPayment)
           return new Response("xPayment required", { status: 400 });
-        const grant = await authority.payUserGrant(principal, body.xPayment);
+        // A top-up purchase (W4c) must bypass the authority's per-address
+        // idempotence cache, or it would hand back the spent batch's grant.
+        const renew =
+          (await this.ctx.storage.get<boolean>(USER_GRANT_RENEWAL_KEY)) === true;
+        const grant = await authority.payUserGrant(principal, body.xPayment, { renew });
         const { logId } = await this.#storeUserGrant(grant);
         // Kick the drain so held/queued user leaves register now that we have
         // a grant, and grant-at-bind's follow-on work (public-root upload,
@@ -1091,6 +1197,13 @@ function forestrieProblem(err: unknown): Response {
 }
 
 class ForestrieUnconfigured extends Error {}
+
+/** The purchased turn batch is spent (W4c) — the caller should offer a top-up. */
+class TurnsExhausted extends Error {
+  constructor() {
+    super("prepaid turns exhausted — top up to continue");
+  }
+}
 
 class PrincipalError extends Error {
   constructor(

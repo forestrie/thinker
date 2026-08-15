@@ -44,6 +44,15 @@ export interface IdentityResponse {
 	 * once paid.
 	 */
 	userGrantChallenge?: string | null;
+	/** Turns remaining in the purchased batch (W4c); null = unmetered. */
+	prepaidTurns?: number | null;
+	/**
+	 * W4d offline parent-policy proof artifacts: the completed user-authority
+	 * creation grant (base64, receipt included) and the forest root public
+	 * key (hex 64-byte x||y) that anchors its receipt.
+	 */
+	userAuthorityGrant?: string | null;
+	rootPublicKeyXY?: string | null;
 }
 
 export interface TurnResponse {
@@ -87,6 +96,8 @@ export interface ReceiptsExport {
 		userSealingDelegated?: boolean;
 		/** Pending x402 challenge (W4b) to sign for the user grant; else null. */
 		userGrantChallenge?: string | null;
+		/** Turns remaining in the purchased batch (W4c); null = unmetered. */
+		prepaidTurns?: number | null;
 	};
 	works: WorkExportWire[];
 }

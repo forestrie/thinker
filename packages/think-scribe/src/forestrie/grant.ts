@@ -161,10 +161,16 @@ export class GrantAuthorityClient {
    * to sign — the caller relays it to the browser wallet, then calls
    * {@link payUserGrant}. On a dark lane it issues straight away.
    */
-  async requestUserGrant(address: string): Promise<UserGrantResult> {
+  async requestUserGrant(
+    address: string,
+    opts: { renew?: boolean } = {},
+  ): Promise<UserGrantResult> {
     const res = await this.#post("/grants/user", {
       address,
       paymentCommitment: await this.payment.commitment("grant_user", address),
+      // Top-up (W4c): bypass the authority's per-address idempotence cache —
+      // a new batch is a NEW grant on a new log (O3), never the spent one.
+      ...(opts.renew ? { renew: true } : {}),
     });
     if (res.status === 402) {
       const challengeB64 = res.body.challengeB64;
@@ -183,10 +189,18 @@ export class GrantAuthorityClient {
    * Resubmit the user grant carrying the wallet-signed x402 `X-PAYMENT`
    * (W4b phase 2). The authority resubmits register-grant → 303 → completes.
    */
-  async payUserGrant(address: string, xPayment: string): Promise<IssuedGrant> {
+  async payUserGrant(
+    address: string,
+    xPayment: string,
+    opts: { renew?: boolean } = {},
+  ): Promise<IssuedGrant> {
     return this.#asIssued(
       "/grants/user",
-      await this.#post("/grants/user", { address, xPayment }),
+      await this.#post("/grants/user", {
+        address,
+        xPayment,
+        ...(opts.renew ? { renew: true } : {}),
+      }),
     );
   }
 }
