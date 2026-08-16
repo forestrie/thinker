@@ -311,7 +311,11 @@ export class ProofPanel {
 				{ coordinatorUrl, logId: userLogId, knownSealerKeyB64 }
 			);
 			this.delegation = 'done';
-			this.delegationDetail = `sealer ${result.sealerId} until ${new Date(result.expiresAt * 1000).toLocaleTimeString()}`;
+			// Formatted immediately into a string — the Date never outlives this
+			// expression, so there is nothing for a SvelteDate to make reactive.
+			// eslint-disable-next-line svelte/prefer-svelte-reactivity
+			const expiry = new Date(result.expiresAt * 1000).toLocaleTimeString();
+			this.delegationDetail = `sealer ${result.sealerId} until ${expiry}`;
 			// Tell the DO: held user leaves release, and collection resumes
 			// for anything already waiting on the lane.
 			try {

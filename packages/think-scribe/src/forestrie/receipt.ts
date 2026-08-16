@@ -457,7 +457,10 @@ export async function verifyUserLeafReceipt(
 	const certificate = headerMap.get(1000);
 	if (!(certificate instanceof Uint8Array))
 		return fail('user-leaf-delegation', 'receipt carries no delegation certificate (label 1000)');
-	let certOk = false;
+	// No initializer: every path out of the catch returns, so TS's control-flow
+	// analysis proves this is assigned before use, and there is no dead `false`
+	// for a reader to mistake for a default.
+	let certOk: boolean;
 	try {
 		certOk = await verifyDelegationCertificateKs256(certificate, userAddress20);
 	} catch (err) {

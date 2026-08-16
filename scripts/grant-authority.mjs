@@ -116,7 +116,6 @@ const USER_AUTHORITY = {
 	grantB64: readFileSync(join(P, 'user-auth-grant.b64'), 'utf8').trim()
 };
 
-const hex = (b) => Buffer.from(b).toString('hex');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // --- auth-log sealing leases (the gap the 2026-08-10 outage exposed) -------

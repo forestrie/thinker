@@ -108,7 +108,13 @@ export class ScribeChat {
 	#session: ScribeSession;
 	#wallet: DemoWallet;
 	#client: AgentClient | null = null;
-	/** In-flight streamed assistant messages, keyed by requestId. */
+	/**
+	 * In-flight streamed assistant messages, keyed by requestId. Private
+	 * bookkeeping, never read from a template: the reactive surface is
+	 * `messages`, and each stream mutates the $state message object it points
+	 * at. A SvelteMap here would add reactivity nothing subscribes to.
+	 */
+	// eslint-disable-next-line svelte/prefer-svelte-reactivity
 	#streams = new Map<string, ChatMessage>();
 
 	/** The chat session id carried in every envelope's claims. */

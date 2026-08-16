@@ -1,11 +1,12 @@
 {
 	"name": "thinker",
 	"private": true,
+	"type": "module",
 	"description": "Forestrie \u00d7 Cloudflare Think demo \u2014 the Scribe: a per-user Think agent producing a tamper-evident, externally verifiable record of a conversation",
 	"scripts": {
 		"dev": "pnpm --filter scribe-worker dev",
 		"typecheck": "pnpm -r typecheck",
-		"lint": "prettier --check .",
+		"lint": "prettier --check . && eslint .",
 		"format": "prettier --write .",
 		"deploy": "pnpm --filter scribe-worker deploy",
 		"dev:ui": "pnpm --filter scribe-ui dev",
@@ -22,10 +23,19 @@
 		]
 	},
 	"devDependencies": {
+		"@eslint/compat": "^2.0.4",
+		"@eslint/js": "^10.0.1",
 		"@forestrie/encoding": "^0.5.0",
 		"@forestrie/grant-builder": "^0.2.1",
 		"@forestrie/scrapi-client": "^0.1.3",
+		"eslint": "^10.2.0",
+		"eslint-config-prettier": "^10.1.8",
+		"eslint-plugin-svelte": "^3.17.0",
+		"globals": "^17.4.0",
 		"prettier": "^3.8.1",
-		"prettier-plugin-svelte": "^3.5.1"
+		"prettier-plugin-svelte": "^3.5.1",
+		"svelte": "^5.55.2",
+		"typescript": "^5.7.0",
+		"typescript-eslint": "^8.58.1"
 	}
 }
