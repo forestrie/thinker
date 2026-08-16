@@ -36,7 +36,8 @@ import {
 import { calculateRoot, verifyInclusion, type Hasher } from '@forestrie/merklelog';
 import { verifyCoseSign1WithParsedKey } from '@forestrie/encoding';
 import { cborDecode, cborEncode, type CborMap } from './cbor.ts';
-import { sha256Hex } from '../attestation.ts';
+import { outputCommitment, sha256Hex } from '../attestation.ts';
+import { inputCommitment, verifyUserEnvelope } from './envelope.ts';
 
 const ALG = 1;
 const KID = 4;
@@ -127,7 +128,20 @@ export async function verifyStatementSignature(
 export interface WorkExport {
 	workId: string;
 	state: string;
-	envelopeB64: string;
+	/**
+	 * The user's signed envelope. Optional since D2: the statement no longer
+	 * embeds it, so an export that omits it simply skips the envelope-side
+	 * checks rather than failing — mirroring the transcript-binding skip.
+	 */
+	envelopeB64?: string;
+	/**
+	 * The user's own plaintext, present only in a proof bundle the BROWSER
+	 * assembles from its local copy (D4). Never exported by the DO and never
+	 * seen by the lane; when present it is checked against the envelope's
+	 * `H(nonce ‖ input)` commitment, which is what makes the bundle a proof of
+	 * *what was said* rather than only that something was.
+	 */
+	input?: string;
 	statementB64?: string;
 	entryId?: string;
 	receiptB64?: string;
@@ -169,9 +183,12 @@ function decodeBase64(value: string): Uint8Array {
  *     caller-trusted key, and the statement kid matches it.
  *  2. receipt — inclusion proof + sealed checkpoint + delegation certificate
  *     verify under the same key as log owner (known-log-key rung).
- *  3. work-binding — workId = SHA-256(user envelope); the committed
- *     statement names that workId and embeds that exact envelope (§7).
- *  4. transcript-binding — SHA-256 of the DO's currently-claimed output text
+ *  3. work-binding — workId = SHA-256(user envelope) and the committed
+ *     statement names that workId (§7). Since D2 that pair IS the binding;
+ *     an export without the envelope falls back to the second conjunct.
+ *  4. input-binding — bundle only (D4): the holder's plaintext opens the
+ *     envelope's H(nonce ‖ input) commitment.
+ *  5. transcript-binding — H(salt ‖ the DO's currently-claimed output text)
  *     equals the committed outputHash. This is the check the tamper beat
  *     breaks: rewrite the DO's memory and the receipts no longer match.
  */
@@ -229,31 +246,82 @@ export async function verifyWorkReceipt(
 	}
 	checks.push({ name: 'receipt', ok: receiptOk, detail: receiptDetail });
 
-	const envelope = decodeBase64(work.envelopeB64);
+	// Work binding. Since D2 the statement no longer repeats the envelope
+	// bytes, and it never needed to: `workId ≡ SHA-256(envelope)`, so
+	// "the envelope hashes to this workId" AND "the statement names this
+	// workId" already prove the statement names exactly those bytes. The old
+	// third conjunct (`claims.userEnvelope === work.envelopeB64`) was redundant
+	// string equality — and the second route by which plaintext reached the log.
 	const claims = parsed.payloadJson ?? {};
-	const workIdOk =
-		(await sha256Hex(envelope)) === work.workId &&
-		claims.workId === work.workId &&
-		claims.userEnvelope === work.envelopeB64;
-	checks.push({
-		name: 'work-binding',
-		ok: workIdOk,
-		detail: workIdOk
-			? `workId ${work.workId.slice(0, 16)}…`
-			: 'workId/envelope do not match the committed statement'
-	});
+	if (work.envelopeB64 !== undefined) {
+		const envelope = decodeBase64(work.envelopeB64);
+		const workIdOk = (await sha256Hex(envelope)) === work.workId && claims.workId === work.workId;
+		checks.push({
+			name: 'work-binding',
+			ok: workIdOk,
+			detail: workIdOk
+				? `workId ${work.workId.slice(0, 16)}…`
+				: 'workId/envelope do not match the committed statement'
+		});
+	} else {
+		const namesWork = claims.workId === work.workId;
+		checks.push({
+			name: 'work-binding',
+			ok: namesWork,
+			detail: namesWork
+				? `statement names workId ${work.workId.slice(0, 16)}… (envelope absent from the export)`
+				: 'the statement does not name this workId'
+		});
+	}
+
+	// Input binding (D1/D4): the user's own copy of their prompt opens the
+	// commitment their wallet signed. Only a bundle carries this — it is the
+	// user's to disclose, which is the entire point of committing the hash.
+	if (typeof work.input === 'string' && work.envelopeB64 !== undefined) {
+		try {
+			const verified = await verifyUserEnvelope(decodeBase64(work.envelopeB64));
+			const opens =
+				inputCommitment(verified.claims.nonce, work.input) === verified.claims.inputHash;
+			checks.push({
+				name: 'input-binding',
+				ok: opens,
+				detail: opens
+					? `H(nonce ‖ input) = ${verified.claims.inputHash.slice(0, 16)}… — signed by ${verified.address}`
+					: 'the supplied text does NOT open the commitment the wallet signed'
+			});
+		} catch (err) {
+			checks.push({ name: 'input-binding', ok: false, detail: String(err) });
+		}
+	}
 
 	if (work.userLeaf) {
-		const userChecks = await verifyUserLeafReceipt(
-			work.envelopeB64,
-			work.userLeaf,
-			userAddress20 ?? null
-		);
-		checks.push(...userChecks.checks);
+		if (work.envelopeB64 === undefined) {
+			// The user leaf IS the envelope, so without those bytes there is no
+			// leaf hash to prove inclusion of. Skipped, and said so — a silently
+			// missing check reads as a passing one.
+			checks.push({
+				name: 'user-leaf',
+				ok: true,
+				detail: 'skipped — the export omits the envelope the leaf is made of'
+			});
+		} else {
+			const userChecks = await verifyUserLeafReceipt(
+				work.envelopeB64,
+				work.userLeaf,
+				userAddress20 ?? null
+			);
+			checks.push(...userChecks.checks);
+		}
 	}
 
 	if (typeof work.currentOutputText === 'string') {
-		const currentHash = await sha256Hex(new TextEncoder().encode(work.currentOutputText));
+		// Salted since D2: the statement's own salt is the opening, so the check
+		// is unchanged in strength but the committed hash no longer leaks short
+		// replies to a dictionary attack.
+		const currentHash = outputCommitment(
+			typeof claims.salt === 'string' ? claims.salt : '',
+			work.currentOutputText
+		);
 		const outputOk = currentHash === claims.outputHash;
 		checks.push({
 			name: 'transcript-binding',

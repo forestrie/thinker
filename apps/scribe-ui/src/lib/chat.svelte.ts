@@ -3,6 +3,7 @@ import { buildUserEnvelope, newTurnClaims, workIdOf } from './envelope.ts';
 import { postTurn, scribeBase, ScribeApiError } from './scribe-api.ts';
 import type { ScribeSession } from './session.svelte.ts';
 import type { DemoWallet } from './wallet.svelte.ts';
+import type { TurnVault } from './vault.svelte.ts';
 import { bytesToB64 } from './utils.ts';
 
 /**
@@ -107,6 +108,7 @@ function projectServerMessage(message: ServerUIMessage): ChatMessage {
 export class ScribeChat {
 	#session: ScribeSession;
 	#wallet: DemoWallet;
+	#vault: TurnVault;
 	#client: AgentClient | null = null;
 	/**
 	 * In-flight streamed assistant messages, keyed by requestId. Private
@@ -130,9 +132,10 @@ export class ScribeChat {
 	/** Fires after a turn completes — the proof panel refreshes on it. */
 	onTurnSettled: (() => void) | null = null;
 
-	constructor(session: ScribeSession, wallet: DemoWallet) {
+	constructor(session: ScribeSession, wallet: DemoWallet, vault: TurnVault) {
 		this.#session = session;
 		this.#wallet = wallet;
+		this.#vault = vault;
 	}
 
 	get streamingMessages(): ChatMessage[] {
@@ -355,9 +358,15 @@ export class ScribeChat {
 	}
 
 	/**
-	 * The attested turn (plan §7): sign the claims client-side, submit the
-	 * envelope over HTTP, and let the stream arrive over the socket. Returns
-	 * the turn's workId = SHA-256(envelope).
+	 * The attested turn (plan §7, redacted in D1): sign a commitment to the
+	 * input client-side, submit `{envelope, input}` over HTTP, and let the
+	 * stream arrive over the socket. Returns the turn's workId =
+	 * SHA-256(envelope).
+	 *
+	 * The opening is kept locally BEFORE the submit: what makes the commitment
+	 * meaningful is that the user can open it later, and a turn that succeeds
+	 * on the server while the browser forgot its plaintext is a proof nobody
+	 * can read (D4).
 	 */
 	async sendTurn(input: string): Promise<string> {
 		const token = await this.#session.ensure();
@@ -368,6 +377,8 @@ export class ScribeChat {
 		const claims = newTurnClaims(input, this.sessionId);
 		const envelope = buildUserEnvelope(claims, this.#wallet);
 		const workId = await workIdOf(envelope);
+		const envelopeB64 = bytesToB64(envelope);
+		this.#vault.keep({ workId, input, envelopeB64, at: Date.now() });
 		this.messages.push({
 			id: `local-${workId.slice(0, 12)}`,
 			role: 'user',
@@ -375,7 +386,7 @@ export class ScribeChat {
 			workId
 		});
 		try {
-			const admitted = await postTurn(sub, token, bytesToB64(envelope));
+			const admitted = await postTurn(sub, token, envelopeB64, input);
 			if (!admitted.accepted) throw new Error(`turn not accepted: ${admitted.status}`);
 			return workId;
 		} catch (err) {

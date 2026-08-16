@@ -104,6 +104,18 @@ function cborEncode(value, out = []) {
 	return out;
 }
 
+// --- input commitment (Phase D: the envelope commits, it does not carry) ----
+// Mirrors packages/think-scribe/src/attestation.ts `saltedCommitmentHex`:
+// H("thinker/input/v1:<nonce byte length>:" ‖ nonce ‖ input), hex.
+function inputCommitment(nonce, input) {
+	const nonceBytes = Buffer.from(nonce, 'utf8');
+	return createHash('sha256')
+		.update(Buffer.from(`thinker/input/v1:${nonceBytes.length}:`, 'utf8'))
+		.update(nonceBytes)
+		.update(Buffer.from(input, 'utf8'))
+		.digest('hex');
+}
+
 // --- user input envelope (canopy KS256 COSE profile) -----------------------
 function buildEnvelope(claims, priv) {
 	const address = keccak_256(secp256k1.getPublicKey(priv, false).slice(1)).slice(-20);
@@ -175,11 +187,13 @@ async function main() {
 	);
 
 	// The attested turn.
+	const input = 'In one short sentence: what makes this conversation tamper-evident?';
+	const nonce = hex(crypto.getRandomValues(new Uint8Array(16)));
 	const claims = {
-		input: 'In one short sentence: what makes this conversation tamper-evident?',
+		inputHash: inputCommitment(nonce, input),
 		sessionId: `m3-smoke-${Date.now()}`,
 		issuedAt: new Date().toISOString(),
-		nonce: hex(crypto.getRandomValues(new Uint8Array(16)))
+		nonce
 	};
 	const envelope = buildEnvelope(claims, priv);
 	const envelopeB64 = Buffer.from(envelope).toString('base64');
@@ -188,7 +202,8 @@ async function main() {
 	const turn = await fetch(`${AGENT}/turn`, {
 		method: 'POST',
 		headers: { ...AUTH, 'Content-Type': 'application/json' },
-		body: JSON.stringify({ envelopeB64 })
+		// The plaintext rides in the body; the envelope carries only its hash.
+		body: JSON.stringify({ envelopeB64, input })
 	});
 	const turnBody = await turn.json().catch(async () => ({ err: await turn.text() }));
 	check(
@@ -213,7 +228,9 @@ async function main() {
 	);
 	if (work?.state !== 'registered') return;
 
-	// The committed statement embeds the user envelope + output hash.
+	// The committed statement names the work unit and commits to the output.
+	// Since Phase D it carries NO plaintext by either route — not embedded in
+	// the statement, and not inside the envelope the statement names.
 	const statement = Buffer.from(work.statementB64, 'base64');
 	writeFileSync(join(OUT, 'm3-statement.cose'), statement);
 	// COSE payload = our JSON work statement; crude extract via JSON slice.
@@ -221,8 +238,23 @@ async function main() {
 	const payloadJson = JSON.parse(
 		text.slice(text.indexOf('{"type":"thinker/work-statement/v1"'), text.lastIndexOf('}') + 1)
 	);
-	check('statement embeds user envelope', payloadJson.userEnvelope === envelopeB64);
+	check('statement does NOT embed the user envelope', payloadJson.userEnvelope === undefined);
+	check(
+		'no plaintext anywhere on the outbound path',
+		!statement.includes(input) &&
+			!Buffer.from(envelopeB64, 'base64').toString('latin1').includes(input)
+	);
 	check('statement workId matches', payloadJson.workId === expectedWorkId);
+	// What the lane actually holds for the user side: a commitment the plaintext
+	// opens, and nothing else. (Claims are a flat JSON object inside the COSE
+	// payload, so the first {...} run is exactly them.)
+	const envelopeText = Buffer.from(envelopeB64, 'base64').toString('latin1');
+	const registeredClaims = JSON.parse(/\{"inputHash".*?\}/.exec(envelopeText)?.[0] ?? '{}');
+	check(
+		'registered envelope commits to the input we sent',
+		registeredClaims.inputHash === inputCommitment(claims.nonce, input),
+		registeredClaims.inputHash?.slice(0, 16)
+	);
 	check(
 		'statement has output hash + salt',
 		/^[0-9a-f]{64}$/.test(payloadJson.outputHash) && /^[0-9a-f]{64}$/.test(payloadJson.salt)

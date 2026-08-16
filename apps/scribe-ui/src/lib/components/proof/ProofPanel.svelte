@@ -7,17 +7,30 @@
 	import WorkCard from './WorkCard.svelte';
 	import {
 		Coins,
+		Download,
 		Gauge,
 		KeyRound,
 		LoaderCircle,
 		RefreshCw,
 		ShieldCheck,
-		Stamp
+		Stamp,
+		Trash2
 	} from '@lucide/svelte';
 
 	let { proofs }: { proofs: ProofPanel } = $props();
 
 	const receiptedCount = $derived(proofs.works.filter((w) => w.state === 'receipted').length);
+
+	// Deleting the local openings cannot be undone and cannot be re-fetched —
+	// the service never had them. Confirm, and say exactly what survives.
+	function deleteLocal() {
+		if (
+			confirm(
+				'Delete this browser’s copy of your messages?\n\nThis removes only local text. The log entries your turns produced are permanent by design and stay verifiable — but without your copy nobody, including you, can show what the committed hashes stand for. Download the proof bundle first if you want to keep that ability.'
+			)
+		)
+			proofs.deleteLocalMessages();
+	}
 </script>
 
 <div class="flex min-h-0 flex-col gap-3">
@@ -213,6 +226,50 @@
 		</Card>
 	{/if}
 
+	<!-- D4/D5: redaction obliges giving the user their own copy, and saying
+	     plainly what is kept where. -->
+	<Card title="Your copy">
+		<div class="space-y-2 p-4 text-xs">
+			<p class="text-kumo-subtle">
+				The log holds <em>commitments</em>, not words: your wallet signs
+				<span class="font-mono">H(nonce ‖ message)</span>, and the agent signs a salted hash of its
+				reply. Your message text never reaches the log — this browser keeps the only copy that can
+				open those hashes, and the agent's own instance forgets its text after about a week. Please
+				don't put personal information in a demo.
+			</p>
+			<div class="flex flex-wrap items-center gap-2">
+				<Button
+					size="sm"
+					variant="secondary"
+					disabled={proofs.export === null}
+					title="Download everything an auditor needs, including your openings"
+					onclick={() => proofs.downloadBundle()}
+				>
+					<Download class="size-3.5" />
+					Download proof bundle
+				</Button>
+				<Button
+					size="sm"
+					variant="ghost"
+					disabled={proofs.keptCount === 0}
+					title="Remove this browser's copy of your message text"
+					onclick={deleteLocal}
+				>
+					<Trash2 class="size-3.5" />
+					Delete my messages
+				</Button>
+				<span class="text-kumo-subtle">
+					{proofs.keptCount} kept locally
+				</span>
+			</div>
+			<p class="text-kumo-subtle">
+				The bundle verifies offline, forever, with this service switched off:
+				<span class="font-mono text-[10px]">verify-receipts.mjs --export &lt;file&gt;</span>.
+				Deleting local text does not and cannot delete log entries — those are permanent by design.
+			</p>
+		</div>
+	</Card>
+
 	<Card title="Attested turns" class="flex min-h-0 flex-1 flex-col">
 		{#snippet actions()}
 			{#if receiptedCount > 0}
@@ -237,6 +294,7 @@
 			{#each [...proofs.works].reverse() as work (work.workId)}
 				<WorkCard
 					{work}
+					keptInput={proofs.keptInput(work.workId)}
 					verification={proofs.verifications[work.workId]}
 					canVerify={!proofs.verifying && proofs.identity !== null}
 					onverify={() => proofs.verify(work)}

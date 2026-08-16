@@ -115,6 +115,18 @@ function cborEncode(value, out = []) {
 	return out;
 }
 
+// --- input commitment (Phase D: the envelope commits, it does not carry) ----
+// Mirrors packages/think-scribe/src/attestation.ts `saltedCommitmentHex`:
+// H("thinker/input/v1:<nonce byte length>:" ‖ nonce ‖ input), hex.
+function inputCommitment(nonce, input) {
+	const nonceBytes = Buffer.from(nonce, 'utf8');
+	return createHash('sha256')
+		.update(Buffer.from(`thinker/input/v1:${nonceBytes.length}:`, 'utf8'))
+		.update(nonceBytes)
+		.update(Buffer.from(input, 'utf8'))
+		.digest('hex');
+}
+
 // --- user input envelope (canopy KS256 COSE profile) -----------------------
 function buildEnvelope(claims, priv) {
 	const address = keccak_256(secp256k1.getPublicKey(priv, false).slice(1)).slice(-20);
@@ -198,11 +210,13 @@ async function main() {
 	);
 
 	// The attested turn.
+	const input = 'Reply with one short sentence about transparency logs.';
+	const nonce = hex(crypto.getRandomValues(new Uint8Array(16)));
 	const claims = {
-		input: 'Reply with one short sentence about transparency logs.',
+		inputHash: inputCommitment(nonce, input),
 		sessionId: `m4-smoke-${Date.now()}`,
 		issuedAt: new Date().toISOString(),
-		nonce: hex(crypto.getRandomValues(new Uint8Array(16)))
+		nonce
 	};
 	const envelope = buildEnvelope(claims, priv);
 	const envelopeB64 = Buffer.from(envelope).toString('base64');
@@ -211,7 +225,8 @@ async function main() {
 	const turn = await fetchRetry(`${AGENT}/turn`, {
 		method: 'POST',
 		headers: { ...AUTH, 'Content-Type': 'application/json' },
-		body: JSON.stringify({ envelopeB64 })
+		// The plaintext rides in the body; the envelope carries only its hash.
+		body: JSON.stringify({ envelopeB64, input })
 	});
 	const turnBody = await turn.json().catch(async () => ({ err: await turn.text() }));
 	check(

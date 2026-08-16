@@ -65,16 +65,33 @@ export {
 export {
 	buildUserEnvelope,
 	verifyUserEnvelope,
+	verifyAttestedInput,
+	inputCommitment,
 	EnvelopeError,
 	COSE_ALG_KS256,
+	INPUT_COMMITMENT_DOMAIN,
+	MAX_INPUT_BYTES,
 	type EnvelopeClaims,
 	type VerifiedEnvelope
 } from './forestrie/envelope.ts';
 export {
 	buildWorkStatementPayload,
+	newSaltHex,
+	outputCommitment,
+	saltedCommitmentHex,
 	sha256Hex,
+	OUTPUT_COMMITMENT_DOMAIN,
 	WORK_STATEMENT_TYPE,
 	type CommittedStep,
 	type WorkStatementInput
 } from './attestation.ts';
+export {
+	planRetentionSweep,
+	workIndexKey,
+	parseWorkIndexKey,
+	MAX_WORK_RECORDS,
+	RETENTION_MS,
+	WORK_INDEX_PREFIX,
+	type RetentionPlan
+} from './retention.ts';
 export { cborEncode, cborDecode, type CborValue, type CborMap } from './forestrie/cbor.ts';

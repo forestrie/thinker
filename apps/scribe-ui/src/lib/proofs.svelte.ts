@@ -19,6 +19,7 @@ import {
 } from './scribe-api.ts';
 import type { ScribeSession } from './session.svelte.ts';
 import type { DemoWallet } from './wallet.svelte.ts';
+import type { TurnVault } from './vault.svelte.ts';
 import { hexToBytes } from './utils.ts';
 
 /** Sequencing is seconds; sealing minutes — poll gently while in flight. */
@@ -45,6 +46,7 @@ function inFlight(work: WorkExportWire): boolean {
 export class ProofPanel {
 	#session: ScribeSession;
 	#wallet: DemoWallet;
+	#vault: TurnVault;
 	#pollTimer: ReturnType<typeof setTimeout> | null = null;
 
 	export = $state<ReceiptsExport | null>(null);
@@ -67,9 +69,19 @@ export class ProofPanel {
 	policy = $state<'idle' | 'verifying' | 'done' | 'error'>('idle');
 	policyResult = $state<ParentPolicyResult | null>(null);
 
-	constructor(session: ScribeSession, wallet: DemoWallet) {
+	constructor(session: ScribeSession, wallet: DemoWallet, vault: TurnVault) {
 		this.#session = session;
 		this.#wallet = wallet;
+		this.#vault = vault;
+	}
+
+	/** The user's locally-kept copy of a prompt, if this browser still has it. */
+	keptInput(workId: string): string | null {
+		return this.#vault.input(workId);
+	}
+
+	get keptCount(): number {
+		return this.#vault.count;
 	}
 
 	get works(): WorkExportWire[] {
@@ -268,7 +280,10 @@ export class ProofPanel {
 		this.verifying = true;
 		try {
 			const result = await verifyWorkReceipt(
-				work,
+				// The locally-kept opening rides along when we have it, so the
+				// check list gains `input-binding`: this text, and no other, is
+				// what the wallet signed a commitment to (D1/D4).
+				{ ...work, input: this.#vault.input(work.workId) ?? undefined },
 				hexToBytes(this.identity.publicKeyXY),
 				this.#wallet.addressBytes()
 			);
@@ -286,6 +301,64 @@ export class ProofPanel {
 
 	async verifyAll(): Promise<void> {
 		for (const work of this.works) if (work.state === 'receipted') await this.verify(work);
+	}
+
+	/**
+	 * The proof bundle (plan §D4) — the demo's closing move.
+	 *
+	 * Everything an auditor needs, in one file the user holds: the identity
+	 * that anchors trust, each turn's envelope, statement, receipt and log
+	 * entry, and — only here, never on the lane — the plaintext openings this
+	 * browser kept. `scripts/verify-receipts.mjs --export <file>` verifies it
+	 * offline, forever, with this service switched off.
+	 *
+	 * Deliberately the same shape as `GET /receipts` plus `input`, so the
+	 * existing verifier reads it unchanged.
+	 */
+	buildBundle(): Record<string, unknown> | null {
+		const exported = this.export;
+		if (!exported) return null;
+		// Formatted straight into the bundle — the Date never outlives this
+		// expression, so there is nothing for a SvelteDate to make reactive.
+		// eslint-disable-next-line svelte/prefer-svelte-reactivity
+		const exportedAt = new Date().toISOString();
+		return {
+			kind: 'thinker/proof-bundle/v1',
+			exportedAt,
+			note: 'Verify offline: scripts/verify-receipts.mjs --export <this file>. The `input` fields are your own copy — they are not held by the service or the log.',
+			principal: exported.principal,
+			attestationMode: exported.attestationMode,
+			identity: exported.identity,
+			forestrie: exported.forestrie,
+			works: exported.works.map((work) => {
+				const input = this.#vault.input(work.workId);
+				return input === null ? work : { ...work, input };
+			})
+		};
+	}
+
+	/** Download the bundle as a file. No-op before the first export lands. */
+	downloadBundle(): void {
+		const bundle = this.buildBundle();
+		if (!bundle) return;
+		const url = URL.createObjectURL(
+			new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' })
+		);
+		const anchor = document.createElement('a');
+		anchor.href = url;
+		anchor.download = `scribe-proof-bundle-${this.#session.sub ?? 'export'}.json`;
+		anchor.click();
+		URL.revokeObjectURL(url);
+	}
+
+	/**
+	 * Forget the locally-kept message text (D4). LOCAL ONLY: the log entries
+	 * these turns produced are permanent by design, and the receipts stay
+	 * verifiable — what is lost is this browser's ability to open the
+	 * commitments, so download the bundle first if that matters.
+	 */
+	deleteLocalMessages(): void {
+		this.#vault.clear();
 	}
 
 	/**

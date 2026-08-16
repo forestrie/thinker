@@ -157,16 +157,23 @@ export async function fetchIdentity(sub: string, token: string): Promise<Identit
 	);
 }
 
+/**
+ * Submit an attested turn. Two parts since Phase D: the envelope carries the
+ * signed commitment `H(nonce ‖ input)` and goes on to the log; `input` is the
+ * plaintext, which the worker needs to run the model and which stops there.
+ * The DO refuses the turn unless the second opens the first.
+ */
 export async function postTurn(
 	sub: string,
 	token: string,
-	envelopeB64: string
+	envelopeB64: string,
+	input: string
 ): Promise<TurnResponse> {
 	return expectJson(
 		await fetch(`${agentPath(sub)}/turn`, {
 			method: 'POST',
 			headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-			body: JSON.stringify({ envelopeB64 })
+			body: JSON.stringify({ envelopeB64, input })
 		})
 	);
 }

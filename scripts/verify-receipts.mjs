@@ -2,17 +2,25 @@
 // T8). Pulls the Scribe's receipt export (or reads a saved one) and verifies
 // every receipted work unit with the log absent:
 //
-//   user-envelope       the user's KS256 signature over their input, and its
-//                       binding to the instance's wcc-1 principal
+//   user-envelope       the user's KS256 signature over their input
+//                       COMMITMENT, and its binding to the instance's wcc-1
+//                       principal
 //   statement-signature the agent's ES256 COSE Sign1 over the work statement
 //   receipt             inclusion proof + sealed checkpoint + delegation cert
 //                       under the known log key (@forestrie/receipt-verify)
-//   work-binding        workId = H(envelope); the statement embeds it
+//   work-binding        workId = H(envelope); the statement names it
+//   input-binding       (proof bundles only) the holder's plaintext opens the
+//                       envelope's H(nonce ‖ input) commitment
 //   user-leaf-*         (O4 separate mode, M5) the envelope's OWN leaf on the
 //                       user's log: KS256 delegation cert under the wallet →
 //                       coverage window → sealer signature → inclusion
-//   transcript-binding  H(the DO's currently-claimed output) = committed
+//   transcript-binding  H(salt ‖ the DO's currently-claimed output) = committed
 //                       outputHash — the check the tamper beat breaks
+//
+// Since Phase D the log holds commitments, not words: a plain `/receipts`
+// export proves WHAT HAPPENED, and a proof bundle exported from the browser
+// (which carries the user's own `input` openings) additionally proves WHAT WAS
+// SAID. Both verify with the service switched off.
 //
 // Trust root = the agent's public key ("known log key", FOR-297). Default is
 // the key the export itself reports — fine for the demo loop, but a real
@@ -83,8 +91,14 @@ if (opt['known-log-key']) {
 
 let works = exported.works ?? [];
 if (opt.work) works = works.filter((w) => w.workId === opt.work);
+const withOpenings = works.filter((w) => typeof w.input === 'string').length;
 console.log(
-	`${works.length} work unit(s) ${opt.work ? 'selected' : 'exported'} for principal ${exported.principal}\n`
+	`${works.length} work unit(s) ${opt.work ? 'selected' : 'exported'} for principal ${exported.principal}`
+);
+console.log(
+	withOpenings
+		? `proof bundle: ${withOpenings} unit(s) carry the holder's own plaintext — input-binding is checked\n`
+		: 'no plaintext openings in this export (the log holds only commitments) — input-binding not checked\n'
 );
 
 let receipted = 0;

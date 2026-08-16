@@ -1,14 +1,21 @@
 import { keccak_256 } from '@noble/hashes/sha3.js';
+import { inputCommitment } from '@forestrie/think-scribe/forestrie/envelope';
 import { cborEncode } from './cbor.ts';
 import { bytesToHex } from './utils.ts';
 import type { DemoWallet } from './wallet.svelte.ts';
 
-/** The claims the user attests to for one turn (plan §7). */
+/**
+ * The claims the user attests to for one turn (plan §7), redacted in Phase D:
+ * the wallet signs a COMMITMENT to the message, never the message. The
+ * plaintext goes to the worker in the `POST /turn` body — it has to, the model
+ * must read it — and stops there; what reaches the log is this envelope.
+ */
 export interface EnvelopeClaims {
-	input: string;
+	/** `H(nonce ‖ input)` — see the canonical `inputCommitment`. */
+	inputHash: string;
 	sessionId: string;
 	issuedAt: string;
-	/** Per-turn random nonce — salting is mandatory, the log is public. */
+	/** Per-turn random nonce — the commitment's salt, and the user's opening. */
 	nonce: string;
 }
 
@@ -40,11 +47,18 @@ export async function workIdOf(envelope: Uint8Array): Promise<string> {
 	return bytesToHex(new Uint8Array(digest));
 }
 
+/**
+ * Claims for a new turn. The nonce is minted first and the commitment taken
+ * over it with the SAME function the worker verifies with — imported, not
+ * mirrored, because two implementations of this hash is two chances to produce
+ * a signature that verifies nowhere.
+ */
 export function newTurnClaims(input: string, sessionId: string): EnvelopeClaims {
+	const nonce = bytesToHex(crypto.getRandomValues(new Uint8Array(16)));
 	return {
-		input,
+		inputHash: inputCommitment(nonce, input),
 		sessionId,
 		issuedAt: new Date().toISOString(),
-		nonce: bytesToHex(crypto.getRandomValues(new Uint8Array(16)))
+		nonce
 	};
 }
