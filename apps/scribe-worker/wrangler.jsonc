@@ -1,12 +1,33 @@
-// Cloudflare practicalities: plan §5. Secrets (ANTHROPIC_API_KEY, later the
-// KMS bearer / configured grant / coordinator token) come from .dev.vars
-// locally and `wrangler secret put` in prod — never from this file.
+// Cloudflare practicalities: plan §5. Secrets (ANTHROPIC_API_KEY, DEMO_PASSWORD,
+// the KMS custodian seed, the grant-authority bearer) come from .dev.vars locally
+// and `wrangler secret put --env <env>` in CI — never from this file.
+//
+// THIS WORKER IS THE DEMO'S SINGLE PUBLIC ORIGIN. It serves the API and the
+// WebSocket natively (the upgrade belongs to the worker that owns the Scribe DO,
+// so it is never proxied) and forwards everything else to the SvelteKit UI over
+// a service binding. The UI and the grant authority are deployed with
+// `workers_dev: false` and are reachable only through those bindings — if either
+// is publicly addressable, the demo gate is decoration. See src/index.ts.
+//
+// Named environments: `dev` and `stage` are separate Workers with separate DO
+// namespaces and separate migration ledgers. `durable_objects`, `vars` and
+// `services` are NOT inherited from the top level by wrangler, so each is
+// repeated in every env block; `migrations`, `main`, `compatibility_*` and
+// `observability` ARE inherited and are declared once.
+//
+// The top-level block is the LOCAL `wrangler dev` shape only — CI always passes
+// `--env`, so the unsuffixed `thinker-scribe` is never deployed.
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "thinker-scribe",
 	"main": "src/index.ts",
 	"compatibility_date": "2026-01-28",
 	"compatibility_flags": ["nodejs_compat"],
+
+	// Explicit rather than defaulted: the deployed URL is load-bearing — it is
+	// the demo's only front door — and an implicit default is a bad thing to
+	// depend on. Add `routes` and flip this to false to move to a custom domain.
+	"workers_dev": true,
 
 	// No [ai] binding in M0: getModel() talks to Anthropic directly over HTTPS.
 	// Re-add {"ai": {"binding": "AI"}} to use Think's string-model-id path
@@ -15,6 +36,10 @@
 	"durable_objects": {
 		"bindings": [{ "name": "Scribe", "class_name": "Scribe" }]
 	},
+
+	// Inheritable: applies to thinker-scribe, -dev and -stage alike. Each script
+	// keeps its OWN applied-migration ledger, so tag "v1" runs exactly once per
+	// script. NEVER edit or renumber v1 — append {"tag":"v2",...} for changes.
 	"migrations": [{ "tag": "v1", "new_sqlite_classes": ["Scribe"] }],
 
 	"observability": {
@@ -22,8 +47,34 @@
 		"traces": { "enabled": true }
 	},
 
+	// Local `wrangler dev` only — see .dev.vars for the rest. Deployed vars
+	// arrive as `wrangler deploy --var` from GitHub Environment variables, on an
+	// explicit allowlist in .github/workflows/deploy.yml. DEV_AUTH is
+	// deliberately absent here and is not on that allowlist.
 	"vars": {
 		// Model override for getModel(); default is claude-sonnet-5 (plan §11 O2).
-		// "MODEL_ID": "claude-opus-4-8"
+		// Deployed environments set MODEL_ID=claude-haiku-4-5 for cost.
+		// "MODEL_ID": "claude-haiku-4-5"
+	},
+
+	"env": {
+		"dev": {
+			"name": "thinker-dev",
+			"workers_dev": true,
+			"durable_objects": {
+				"bindings": [{ "name": "Scribe", "class_name": "Scribe" }]
+			},
+			"services": [{ "binding": "UI", "service": "thinker-ui-dev" }],
+			"vars": {}
+		},
+		"stage": {
+			"name": "thinker-stage",
+			"workers_dev": true,
+			"durable_objects": {
+				"bindings": [{ "name": "Scribe", "class_name": "Scribe" }]
+			},
+			"services": [{ "binding": "UI", "service": "thinker-ui-stage" }],
+			"vars": {}
+		}
 	}
 }

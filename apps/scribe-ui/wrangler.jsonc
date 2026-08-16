@@ -1,0 +1,55 @@
+// Workers-with-static-assets, NOT Pages. @sveltejs/adapter-cloudflare switches
+// output shape purely on the presence of this file: with `main` + `assets` set,
+// is_building_for_cloudflare_pages() returns false and it emits a Worker instead
+// of a Pages bundle (_routes.json stops being produced — expected, not a
+// regression). Pages was rejected because `wrangler pages deploy` has no way to
+// set plaintext vars, and PUBLIC_* must be runtime Worker vars.
+//
+// ‼️ `main` IS OWNED BY THE ADAPTER. It sets worker_dest = wrangler_config.main
+// (adapter index.js:58-59) and copies its generated worker there on every build
+// (:117). Point it at the adapter's own output path and NEVER at a source file
+// you care about — anything there is overwritten. This is also why the demo gate
+// and the API routing live in apps/scribe-worker rather than here.
+//
+// NOT PUBLIC. `workers_dev: false` — this Worker is reachable only through the
+// scribe worker's `UI` service binding, which is what makes the demo gate a real
+// front door rather than one of two. The Worker must still RUN (it is not a
+// static site): the UI reads $env/dynamic/public, which SvelteKit serialises
+// into the page shell at request time, so PUBLIC_* are deploy-time Worker vars
+// injected by `wrangler deploy --var` — not baked into the bundle. Never set
+// `prerender` on src/routes/+page.ts: prerendering removes the server that
+// injects them.
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "thinker-ui",
+	"main": ".svelte-kit/cloudflare/_worker.js",
+	"compatibility_date": "2026-01-28",
+	"compatibility_flags": ["nodejs_compat"],
+	"workers_dev": false,
+
+	"assets": {
+		"binding": "ASSETS",
+		"directory": ".svelte-kit/cloudflare"
+	},
+
+	"observability": {
+		"enabled": true
+	},
+
+	// `assets` is inheritable; `vars` is not — hence the empty per-env blocks,
+	// which also silence wrangler's "vars is not inherited" warning.
+	"vars": {},
+
+	"env": {
+		"dev": {
+			"name": "thinker-ui-dev",
+			"workers_dev": false,
+			"vars": {}
+		},
+		"stage": {
+			"name": "thinker-ui-stage",
+			"workers_dev": false,
+			"vars": {}
+		}
+	}
+}
