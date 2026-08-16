@@ -88,6 +88,8 @@ jobs:
           VAR_AGENT_KEY_EPOCH: ${{ vars.AGENT_KEY_EPOCH }}
           VAR_ATTESTATION_MODE: ${{ vars.ATTESTATION_MODE }}
           VAR_MODEL_ID: ${{ vars.MODEL_ID }}
+          VAR_DEMO_DAILY_TURN_CAP: ${{ vars.DEMO_DAILY_TURN_CAP }}
+          VAR_DEMO_USER_DAILY_TURN_CAP: ${{ vars.DEMO_USER_DAILY_TURN_CAP }}
           VAR_ROOT_LOG_ID: ${{ vars.ROOT_LOG_ID }}
           VAR_AGENT_AUTH_LOG_ID: ${{ vars.AGENT_AUTH_LOG_ID }}
           VAR_USER_AUTH_LOG_ID: ${{ vars.USER_AUTH_LOG_ID }}
@@ -113,6 +115,7 @@ jobs:
           for name in FORESTRIE_BASE_URL FORESTRIE_ROOT_LOG_ID FORESTRIE_ROOT_PUBLIC_KEY_XY \
                       DELEGATION_COORDINATOR_URL KNOWN_SEALER_KEY GRANT_USER_AUTHORITY \
                       KEY_PROVIDER AGENT_KEY_EPOCH ATTESTATION_MODE MODEL_ID \
+                      DEMO_DAILY_TURN_CAP DEMO_USER_DAILY_TURN_CAP \
                       ROOT_LOG_ID AGENT_AUTH_LOG_ID USER_AUTH_LOG_ID \
                       AGENT_AUTH_GRANT_B64 USER_AUTH_GRANT_B64 USER_GRANT_BATCH_TURNS \
                       PUBLIC_DELEGATION_COORDINATOR_URL PUBLIC_KNOWN_SEALER_KEY \
@@ -315,6 +318,8 @@ jobs:
             --var AGENT_KEY_EPOCH:'${{ vars.AGENT_KEY_EPOCH }}' \
             --var ATTESTATION_MODE:'${{ vars.ATTESTATION_MODE }}' \
             --var MODEL_ID:'${{ vars.MODEL_ID }}' \
+            --var DEMO_DAILY_TURN_CAP:'${{ vars.DEMO_DAILY_TURN_CAP }}' \
+            --var DEMO_USER_DAILY_TURN_CAP:'${{ vars.DEMO_USER_DAILY_TURN_CAP }}' \
           echo "deployed: https://thinker-${{ inputs.environment }}.${{ vars.WORKERS_DEV_ZONE }}"
 
   # -------------------------------------------------------------------- smoke

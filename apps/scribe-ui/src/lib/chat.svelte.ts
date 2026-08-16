@@ -382,10 +382,16 @@ export class ScribeChat {
 			// 402 = prepaid batch spent (W4c): the DO refused the turn and is
 			// already re-requesting a grant — the proof panel's poll picks up
 			// the fresh challenge (or the top-up button kicks it).
-			this.turnError =
-				err instanceof ScribeApiError && err.status === 402
-					? 'Prepaid turns exhausted — top up in the proof panel to continue.'
-					: String(err);
+			// 429 = a daily demo-turn cap: a time-boxed bound the wallet cannot top
+			// up, so do NOT point at the proof panel.
+			if (err instanceof ScribeApiError && err.status === 402) {
+				this.turnError = 'Prepaid turns exhausted — top up in the proof panel to continue.';
+			} else if (err instanceof ScribeApiError && err.status === 429) {
+				this.turnError =
+					'Daily demo-turn cap reached — this shared demo is rate-limited today. Please try again tomorrow.';
+			} else {
+				this.turnError = String(err);
+			}
 			this.awaiting = false;
 			this.onTurnSettled?.();
 			throw err;

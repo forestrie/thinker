@@ -1,4 +1,30 @@
-export { Scribe, DEFAULT_MODEL_ID, PRINCIPAL_HEADER, type ScribeEnv } from './scribe.ts';
+export {
+	Scribe,
+	DEFAULT_MODEL_ID,
+	DEFAULT_DEMO_DAILY_TURN_CAP,
+	DEFAULT_DEMO_USER_DAILY_TURN_CAP,
+	PRINCIPAL_HEADER,
+	type ScribeEnv
+} from './scribe.ts';
+export { DemoBudget } from './demo-budget.ts';
+export {
+	applyDailyCaps,
+	readDailyCaps,
+	admit as admitDailyCap,
+	peek as peekDailyCap,
+	utcDay,
+	counterKey,
+	parseCap,
+	USER_TURNS_PREFIX,
+	GLOBAL_TURNS_PREFIX,
+	type CounterStore,
+	type CapStatus,
+	type AdmitResult,
+	type CapConfig,
+	type CapContext,
+	type CapDecision,
+	type DailyCapCounters
+} from './demo-cap.ts';
 export { bytesToHex, hexToBytes, type KeyProvider } from './keys/provider.ts';
 export { DoResidentKeyProvider } from './keys/do-resident.ts';
 export {

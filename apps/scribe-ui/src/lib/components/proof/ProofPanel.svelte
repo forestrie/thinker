@@ -5,7 +5,15 @@
 	import Badge from '$lib/components/ui/Badge.svelte';
 	import Button from '$lib/components/ui/Button.svelte';
 	import WorkCard from './WorkCard.svelte';
-	import { Coins, KeyRound, LoaderCircle, RefreshCw, ShieldCheck, Stamp } from '@lucide/svelte';
+	import {
+		Coins,
+		Gauge,
+		KeyRound,
+		LoaderCircle,
+		RefreshCw,
+		ShieldCheck,
+		Stamp
+	} from '@lucide/svelte';
 
 	let { proofs }: { proofs: ProofPanel } = $props();
 
@@ -140,6 +148,22 @@
 				</div>
 				{#if proofs.payment === 'error' && proofs.paymentDetail}
 					<p class="text-kumo-danger">{proofs.paymentDetail}</p>
+				{/if}
+
+				<!-- Daily demo-turn cap: the global cap is the real spend bound, so
+				     surface it plainly — a silent cap reads as breakage. -->
+				{#if proofs.demoTurns}
+					<div class="flex items-center gap-2 border-t border-kumo-line pt-2">
+						<Gauge class="size-3.5 text-kumo-subtle" />
+						<span
+							class={proofs.demoTurns.global.used >= proofs.demoTurns.global.cap
+								? 'text-kumo-danger'
+								: 'text-kumo-default'}
+						>
+							turn {proofs.demoTurns.global.used} of {proofs.demoTurns.global.cap} allowed daily demo
+							turns
+						</span>
+					</div>
 				{/if}
 			</div>
 		</Card>
