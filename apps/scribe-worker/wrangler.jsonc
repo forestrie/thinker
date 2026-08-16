@@ -24,6 +24,12 @@
 	"compatibility_date": "2026-01-28",
 	"compatibility_flags": ["nodejs_compat"],
 
+	// Preview URLs are enabled by DEFAULT whenever workers.dev is on, and each is
+	// a second public hostname for the same Worker. For the front door that means
+	// an extra surface to reason about; for the two bound services it would undo
+	// workers_dev:false entirely. Off everywhere, explicitly.
+	"preview_urls": false,
+
 	// Explicit rather than defaulted: the deployed URL is load-bearing — it is
 	// the demo's only front door — and an implicit default is a bad thing to
 	// depend on. Add `routes` and flip this to false to move to a custom domain.

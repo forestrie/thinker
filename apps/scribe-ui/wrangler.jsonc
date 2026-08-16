@@ -21,6 +21,11 @@
 // injects them.
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
+	// Preview URLs are enabled by DEFAULT whenever workers.dev is on, and each is
+	// a second public hostname for the same Worker. For a bound service that
+	// would undo workers_dev:false entirely. Off explicitly.
+	"preview_urls": false,
+
 	"name": "thinker-ui",
 	"main": ".svelte-kit/cloudflare/_worker.js",
 	"compatibility_date": "2026-01-28",

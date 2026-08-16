@@ -13,6 +13,11 @@
 // called here; src/sign-grant.ts is the WebCrypto replacement.
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
+	// Preview URLs are enabled by DEFAULT whenever workers.dev is on, and each is
+	// a second public hostname for the same Worker. For a bound service that
+	// would undo workers_dev:false entirely. Off explicitly.
+	"preview_urls": false,
+
 	"name": "thinker-grant-authority",
 	"main": "src/index.ts",
 	"compatibility_date": "2026-01-28",

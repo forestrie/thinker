@@ -341,15 +341,40 @@ jobs:
           [ "$code" = 200 ] || { echo "::error::expected 200 with credentials, got $code"; exit 1; }
           echo "gate opens: 200"
 
+      # The UI is served THROUGH the service binding, so a static asset proves the
+      # binding works — a 200 on `/` alone could be an error page.
+      - name: The UI is served over the service binding
+        run: |
+          read -r code type < <(curl -s -o /dev/null -w '%{http_code} %{content_type}' -u "demo:$DEMO_PASSWORD" "$URL/favicon.svg")
+          [ "$code" = 200 ] || { echo "::error::favicon.svg returned $code — UI binding is not serving"; exit 1; }
+          echo "UI binding serves assets: $code $type"
+
       # DEV_AUTH is unset, so a dev: bearer must be rejected. If this ever
       # returns 200 the entire identity model is bypassable.
+      #
+      # The path matters: /identity, /turn and /receipts are NOT top-level routes
+      # — they are reached through routeAgentRequest at
+      # /agents/scribe/user-<sub>/…, and a bare /identity falls through to the
+      # UI, which would make this assertion pass for the wrong reason.
       - name: 'dev: bearer tokens are rejected'
         run: |
+          agent="$URL/agents/scribe/user-0x0000000000000000000000000000000000000000"
           code=$(curl -s -o /dev/null -w '%{http_code}' -u "demo:$DEMO_PASSWORD" \
             -H 'Authorization: Bearer dev:0x0000000000000000000000000000000000000000' \
-            "$URL/identity")
+            "$agent/identity")
           [ "$code" != 200 ] || { echo "::error::dev: bearer was ACCEPTED — DEV_AUTH is enabled"; exit 1; }
           echo "dev: bearer rejected ($code)"
+
+      # wcc-1 binds the challenge to the origin that issued it. If this names
+      # anything but the deployed host, sessions minted here verify nowhere.
+      - name: The auth challenge binds the deployed origin
+        run: |
+          host=${URL#https://}
+          body=$(curl -s -u "demo:$DEMO_PASSWORD" -X POST -H 'Content-Type: application/json' \
+            -d '{"address":"0x0000000000000000000000000000000000000000"}' "$URL/auth/challenge")
+          claim=$(printf '%s' "$body" | jq -r .challenge | base64 -d 2>/dev/null | jq -r .domain)
+          [ "$claim" = "$host" ] || { echo "::error::challenge domain '$claim' != '$host'"; exit 1; }
+          echo "challenge binds $claim"
 
       # The two bound services carry workers_dev:false. If either answers on its
       # own subdomain, the demo gate is decoration.

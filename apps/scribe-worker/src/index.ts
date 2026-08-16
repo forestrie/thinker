@@ -11,10 +11,15 @@ export { Scribe };
  * to is same-origin, which is what removes the CORS surface entirely and gives
  * the demo password one place to live.
  *
- *   /auth/*, /turn, /receipts, /identity, /pay-user-grant  → handled here
+ *   /auth/*                  → handled here (POST only, both routes)
  *   /agents/*                → handled here, natively; the WebSocket upgrade
  *                              belongs to the worker that owns the Scribe DO,
- *                              so it is never proxied
+ *                              so it is never proxied. The DO's own routes
+ *                              (/identity, /turn, /receipts, /pay-user-grant …)
+ *                              live UNDER this prefix, as
+ *                              /agents/scribe/user-<sub>/<route> — there are no
+ *                              top-level aliases, and a bare /identity falls
+ *                              through to the UI
  *   /coordinator/*           → proxied to the delegation coordinator, which
  *                              serves no CORS headers of its own
  *   everything else          → the SvelteKit UI, over a service binding
