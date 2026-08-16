@@ -347,9 +347,13 @@ jobs:
       # binding works — a 200 on `/` alone could be an error page.
       - name: The UI is served over the service binding
         run: |
-          read -r code type < <(curl -s -o /dev/null -w '%{http_code} %{content_type}' -u "demo:$DEMO_PASSWORD" "$URL/favicon.svg")
+          # Not `read … < <(curl …)`: curl -w emits no trailing newline, so read
+          # returns non-zero at EOF and `bash -e` kills the step before the
+          # assertion below ever runs — a false failure that looks like a real one.
+          out=$(curl -s -o /dev/null -w '%{http_code} %{content_type}' -u "demo:$DEMO_PASSWORD" "$URL/favicon.svg")
+          code=${out%% *}
           [ "$code" = 200 ] || { echo "::error::favicon.svg returned $code — UI binding is not serving"; exit 1; }
-          echo "UI binding serves assets: $code $type"
+          echo "UI binding serves assets: $out"
 
       # DEV_AUTH is unset, so a dev: bearer must be rejected. If this ever
       # returns 200 the entire identity model is bypassable.
