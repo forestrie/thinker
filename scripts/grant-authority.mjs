@@ -1,3 +1,9 @@
+// SUPERSEDED by apps/grant-authority (a Cloudflare Worker) — plan A3.
+// scripts/authority.sh now runs THAT on :8799, so local and deployed are one
+// codebase. This file is no longer wired to anything and is kept only for the
+// .provision/books.jsonl payment bookkeeping it does, which the Worker cannot
+// (no filesystem). Do not add behaviour here: a second grant faucet holding
+// K(L) of both authority logs is exactly the thing that drifts unnoticed.
 // grant-authority — the M5 grant-issuing seam (plan §11 O5, O4; T4/T10).
 // A small HTTP authority the Scribe's `RequestGrantProvider` calls at init,
 // playing the role provision.sh played by hand: it holds the authority key

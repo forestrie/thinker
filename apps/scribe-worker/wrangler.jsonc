@@ -64,7 +64,10 @@
 			"durable_objects": {
 				"bindings": [{ "name": "Scribe", "class_name": "Scribe" }]
 			},
-			"services": [{ "binding": "UI", "service": "thinker-ui-dev" }],
+			"services": [
+				{ "binding": "UI", "service": "thinker-ui-dev" },
+				{ "binding": "AUTHORITY", "service": "thinker-grant-authority-dev" }
+			],
 			"vars": {}
 		},
 		"stage": {
@@ -73,7 +76,10 @@
 			"durable_objects": {
 				"bindings": [{ "name": "Scribe", "class_name": "Scribe" }]
 			},
-			"services": [{ "binding": "UI", "service": "thinker-ui-stage" }],
+			"services": [
+				{ "binding": "UI", "service": "thinker-ui-stage" },
+				{ "binding": "AUTHORITY", "service": "thinker-grant-authority-stage" }
+			],
 			"vars": {}
 		}
 	}

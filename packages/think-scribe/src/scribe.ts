@@ -311,7 +311,28 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 		return DoResidentKeyProvider.load(this.ctx.storage, decodeBase64(this.env.SCRIBE_KEK));
 	}
 
+	/**
+	 * The grant authority client.
+	 *
+	 * Deployed, the authority is a sibling Worker with `workers_dev: false`,
+	 * reached over the AUTHORITY service binding — it has no public URL to
+	 * address, which is the point: an authority that can mint writer credentials
+	 * against a live lane should not be on the internet. `GRANT_AUTHORITY_URL`
+	 * then names only the base path the binding is called with.
+	 *
+	 * Locally, `scripts/authority.sh` runs the same Worker on :8799 and there is
+	 * no binding, so the URL is a real origin and global fetch is used. Both
+	 * paths run identical authority code.
+	 */
 	#authority(): GrantAuthorityClient | null {
+		const binding = (this.env as { AUTHORITY?: Fetcher }).AUTHORITY;
+		if (binding)
+			return new GrantAuthorityClient(
+				this.env.GRANT_AUTHORITY_URL || 'https://authority.internal',
+				this.env.GRANT_AUTHORITY_TOKEN,
+				undefined,
+				binding.fetch.bind(binding)
+			);
 		if (!this.env.GRANT_AUTHORITY_URL) return null;
 		return new GrantAuthorityClient(this.env.GRANT_AUTHORITY_URL, this.env.GRANT_AUTHORITY_TOKEN);
 	}

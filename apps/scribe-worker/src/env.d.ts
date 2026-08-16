@@ -25,6 +25,11 @@ declare global {
 		 * serves the UI there), so every use must be guarded.
 		 */
 		UI?: Fetcher;
+		/**
+		 * The grant authority, service-bound. Absent in local `wrangler dev`
+		 * (scripts/authority.sh runs it on :8799 there), so guard every use.
+		 */
+		AUTHORITY?: Fetcher;
 		Scribe: DurableObjectNamespace<Scribe>;
 	}
 }

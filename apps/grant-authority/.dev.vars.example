@@ -1,0 +1,31 @@
+# Local wiring for `wrangler dev`. DO NOT fill this in by hand and DO NOT commit
+# a real .dev.vars — `scripts/authority.sh` generates it on every run from
+# .provision/ and doppler, so it stays correct across a re-provision. This file
+# exists to document the contract the deployed Worker expects, which is the same
+# set of names deploy.yml puts in GitHub Environment secrets and variables.
+#
+# SECRETS (wrangler secret put --env <env>):
+#   AUTHORITY_ES256_JWK   K(L) of BOTH authority logs, as a private JWK. The
+#                         crown jewel: possession is the power to mint writer
+#                         credentials under the demo's forest.
+#   GRANT_AUTHORITY_TOKEN Mandatory bearer. Unset, the Worker serves only
+#                         /healthz rather than running as an open grant faucet.
+#   COORDINATOR_APP_TOKEN Operator token for the KS256 public-root upload that
+#                         user grants need. Absent, agent grants still work.
+AUTHORITY_ES256_JWK='{"kty":"EC","crv":"P-256","d":"…","x":"…","y":"…"}'
+GRANT_AUTHORITY_TOKEN='…'
+COORDINATOR_APP_TOKEN='…'
+
+# VARS (deploy --var, from GitHub Environment variables). Not secret: log ids are
+# public identifiers and the auth grants are public credentials that only prove
+# the parent relationship. They are here rather than in wrangler.jsonc because
+# they differ per provisioned forest.
+FORESTRIE_BASE_URL='https://api-a.forest-2.forestrie.dev'
+DELEGATION_COORDINATOR_URL='https://coordinator-a.forest-2.forestrie.dev'
+KNOWN_SEALER_KEY='…'
+ROOT_LOG_ID='…'
+AGENT_AUTH_LOG_ID='…'   # bit-free parent  → agent grants (never payment-gated)
+USER_AUTH_LOG_ID='…'    # GF_CHILD_PAYMENT_REQUIRED → user grants (x402, W4b)
+AGENT_AUTH_GRANT_B64='…'
+USER_AUTH_GRANT_B64='…'
+USER_GRANT_BATCH_TURNS='16'
