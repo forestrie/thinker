@@ -1214,25 +1214,77 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 		// SQLite DATETIME columns hold 'YYYY-MM-DD HH:MM:SS' in UTC.
 		const stamp = new Date(cutoff).toISOString().replace('T', ' ').slice(0, 19);
 		let deleted = false;
-		const attempt = (run: () => unknown) => {
+		let ok = true;
+		// Retention IS the privacy guarantee: past the window the plaintext must
+		// be gone. These tables belong to Think / the agents SDK, so a version
+		// bump could rename one — and a swallowed error would then leave prompts
+		// on disk indefinitely while the sweep reported success. So each table is
+		// deleted AND re-counted below the cutoff: anything left (a wrong
+		// name/column, or a delete that matched nothing) is logged LOUD and marks
+		// the sweep not-ok, rather than passing silently.
+		const prune = (
+			label: string,
+			del: () => unknown,
+			remaining: () => Array<{ n: number }>
+		): void => {
 			try {
-				run();
-				deleted = true;
+				del();
+				const left = remaining()[0]?.n ?? 0;
+				if (left > 0) {
+					ok = false;
+					console.error(
+						`retention: ${label} still holds ${left} rows older than the cutoff after prune`
+					);
+				} else {
+					deleted = true;
+				}
 			} catch (err) {
-				console.warn('retention: transcript prune skipped a table', err);
+				ok = false;
+				console.error(`retention: transcript prune FAILED for ${label} (schema drift?)`, err);
 			}
 		};
-		// The FTS mirror first — it selects the ids from the table the next
-		// statement empties.
-		attempt(
-			() => this.sql`DELETE FROM assistant_fts WHERE id IN (
-				SELECT id FROM assistant_messages WHERE created_at < ${stamp}
-			)`
+		// The FTS mirror carries the same text as the messages it indexes, so it
+		// goes first (its ids come from the messages table the next step empties).
+		// It has no timestamp of its own to re-count; a wrong table name here still
+		// throws and is caught loud, and the assistant_messages check below is the
+		// real guard that plaintext is gone.
+		prune(
+			'assistant_fts',
+			() =>
+				this.sql`DELETE FROM assistant_fts WHERE id IN (
+					SELECT id FROM assistant_messages WHERE created_at < ${stamp}
+				)`,
+			() => [{ n: 0 }]
 		);
-		attempt(() => this.sql`DELETE FROM assistant_messages WHERE created_at < ${stamp}`);
-		attempt(() => this.sql`DELETE FROM assistant_compactions WHERE created_at < ${stamp}`);
+		prune(
+			'assistant_messages',
+			() => this.sql`DELETE FROM assistant_messages WHERE created_at < ${stamp}`,
+			() =>
+				this.sql<{
+					n: number;
+				}>`SELECT COUNT(*) AS n FROM assistant_messages WHERE created_at < ${stamp}`
+		);
+		prune(
+			'assistant_compactions',
+			() => this.sql`DELETE FROM assistant_compactions WHERE created_at < ${stamp}`,
+			() =>
+				this.sql<{
+					n: number;
+				}>`SELECT COUNT(*) AS n FROM assistant_compactions WHERE created_at < ${stamp}`
+		);
 		// Think's submissions store epoch ms, not a DATETIME string.
-		attempt(() => this.sql`DELETE FROM cf_think_submissions WHERE created_at < ${cutoff}`);
+		prune(
+			'cf_think_submissions',
+			() => this.sql`DELETE FROM cf_think_submissions WHERE created_at < ${cutoff}`,
+			() =>
+				this.sql<{
+					n: number;
+				}>`SELECT COUNT(*) AS n FROM cf_think_submissions WHERE created_at < ${cutoff}`
+		);
+		if (!ok)
+			console.error(
+				'retention: transcript prune did not fully complete — plaintext may persist past its retention window'
+			);
 		return deleted;
 	}
 
@@ -1308,8 +1360,14 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 			await this.ctx.storage.put(PRINCIPAL_STORAGE_KEY, sub);
 			// Grant-at-bind: kick user-grant acquisition off the request path —
 			// issuance waits on an auth-log seal (up to ~a minute) and nothing
-			// here should block on it.
-			if (this.#attestationMode() === 'separate' && this.env.GRANT_AUTHORITY_URL)
+			// here should block on it. Fire when the authority is reachable by
+			// EITHER a URL or the AUTHORITY service binding: the deployed worker
+			// reaches it over the binding with no URL, so gating on the URL alone
+			// skipped grant-at-bind there and the user log (and its sealing/pay
+			// affordances) only appeared at the first turn's drain.
+			const authorityReachable =
+				!!this.env.GRANT_AUTHORITY_URL || !!(this.env as { AUTHORITY?: Fetcher }).AUTHORITY;
+			if (this.#attestationMode() === 'separate' && authorityReachable)
 				await this.schedule(0, 'acquireUserGrant', {});
 			return sub;
 		}

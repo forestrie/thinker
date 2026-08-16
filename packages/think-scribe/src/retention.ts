@@ -17,7 +17,15 @@
 /** Work records kept per user. Belt-and-braces: expiry is the real bound. */
 export const MAX_WORK_RECORDS = 1000;
 
-/** How long a turn's record and its plaintext survive in the DO. */
+/**
+ * How long a turn's record and its plaintext survive in the DO.
+ *
+ * Floor: this MUST stay well above the receipt-collection budget (max polls ×
+ * poll interval, ~20 min today). The sweep deletes a record by age without
+ * checking its state, so a window shorter than that budget could drop a turn
+ * whose receipt is still being collected. A week clears it by orders of
+ * magnitude — keep that margin if this is ever tuned down.
+ */
 export const RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**

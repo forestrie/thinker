@@ -271,7 +271,12 @@ set_var USER_AUTH_GRANT_B64 "$USER_AUTH_GRANT_B64"
 set_var USER_GRANT_BATCH_TURNS 16
 
 # --- scribe-ui -------------------------------------------------------------
-set_var PUBLIC_DELEGATION_COORDINATOR_URL "${DELEGATION_COORDINATOR_URL:-https://coordinator-a.forest-2.forestrie.dev}"
+# The browser reaches the coordinator through the worker's same-origin
+# /coordinator proxy — canopy's coordinator serves no CORS headers, so a direct
+# cross-origin fetch fails ("TypeError: Failed to fetch"). The PUBLIC
+# (browser-facing) value is therefore the proxy PATH, not the raw origin; the
+# worker's own DELEGATION_COORDINATOR_URL (above) is the proxy target.
+set_var PUBLIC_DELEGATION_COORDINATOR_URL "/coordinator"
 set_var PUBLIC_KNOWN_SEALER_KEY "${KNOWN_SEALER_KEY:-z1YarLKXrsRe5egrwrFfbeYadd9lOqplKxbRuMGymHUOSY7YAfdOhhPWb3H72TrPMiMLw0CBMpDPXUGMEvbkOQ==}"
 # PUBLIC_SCRIBE_BASE is deliberately ABSENT: unset is what selects same-origin,
 # and same-origin is what makes the scribe worker the single public front door.
