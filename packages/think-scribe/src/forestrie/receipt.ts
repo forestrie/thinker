@@ -530,9 +530,7 @@ export async function verifyUserLeafReceipt(
 	// 3+4. Receipt signature under the delegated key; inclusion under the peak.
 	const hasher = subtleHasher();
 	const envelope = decodeBase64(envelopeB64);
-	const inner = new Uint8Array(
-		await crypto.subtle.digest('SHA-256', envelope.buffer as ArrayBuffer)
-	);
+	const inner = new Uint8Array(await crypto.subtle.digest('SHA-256', envelope as BufferSource));
 	const leafHash = await univocityLeafHash(idtimestampBe8, inner);
 	const leafIdx = parsed.proof.leafIndex ?? parsed.proof.mmrIndex ?? 0n;
 	const peak =

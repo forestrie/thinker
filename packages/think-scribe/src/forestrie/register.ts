@@ -70,7 +70,7 @@ export async function registerStatement(
 	const statusUrl = res.headers.get('Location');
 	if (!statusUrl) throw new ScrapiError(303, 'registration 303 without Location');
 
-	const digest = await crypto.subtle.digest('SHA-256', statement.buffer as ArrayBuffer);
+	const digest = await crypto.subtle.digest('SHA-256', statement as BufferSource);
 	const contentHash = [...new Uint8Array(digest)]
 		.map((b) => b.toString(16).padStart(2, '0'))
 		.join('');

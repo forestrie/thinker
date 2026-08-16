@@ -10,7 +10,10 @@
 		"format": "prettier --write .",
 		"deploy": "pnpm --filter scribe-worker deploy",
 		"dev:ui": "pnpm --filter scribe-ui dev",
-		"build:ui": "pnpm --filter scribe-ui build"
+		"build:ui": "pnpm --filter scribe-ui build",
+		"test": "pnpm -r test",
+		"build": "pnpm -r --if-present build",
+		"ci": "pnpm lint && pnpm typecheck && pnpm test && pnpm build"
 	},
 	"packageManager": "pnpm@10.6.5",
 	"engines": {

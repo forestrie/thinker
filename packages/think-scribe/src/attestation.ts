@@ -42,7 +42,7 @@ export interface WorkStatementInput {
 export const WORK_STATEMENT_TYPE = 'thinker/work-statement/v1';
 
 export async function sha256Hex(bytes: Uint8Array): Promise<string> {
-	const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes.buffer as ArrayBuffer));
+	const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes as BufferSource));
 	let out = '';
 	for (const b of digest) out += b.toString(16).padStart(2, '0');
 	return out;

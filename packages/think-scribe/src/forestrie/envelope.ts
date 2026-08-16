@@ -133,9 +133,11 @@ export async function verifyUserEnvelope(envelope: Uint8Array): Promise<Verified
 	)
 		throw new EnvelopeError('envelope claims must be {input, sessionId, issuedAt, nonce}');
 
-	const digest = new Uint8Array(
-		await crypto.subtle.digest('SHA-256', envelope.buffer as ArrayBuffer)
-	);
+	// Hash the VIEW, not `envelope.buffer` — .buffer is the whole backing store,
+	// so any Uint8Array with a non-zero byteOffset (or shorter than its buffer)
+	// would hash the wrong bytes. Currently every caller passes an owned buffer,
+	// which is what masked it.
+	const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', envelope as BufferSource));
 	let workId = '';
 	for (const b of digest) workId += b.toString(16).padStart(2, '0');
 	let address = '0x';
