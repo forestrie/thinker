@@ -6,6 +6,10 @@ config/instance.jsonc
 *.log
 worker-configuration.d.ts
 .DS_Store
-.provision/
+# Provisioning state: private keys (root/authority/steward ES256 PEMs), issued
+# grants, ids.env. The glob is deliberately wide — a `.provision.bak-*` copy was
+# NOT matched by the old `.provision/` rule and sat untracked in the working
+# tree, one `git add -A` away from publishing the lane's trust anchor.
+.provision*
 config/genesis.cbor
 **/test/.out/
