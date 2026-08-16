@@ -634,15 +634,28 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 		return ns.get(ns.idFromName('global')) as unknown as DemoBudgetRpc;
 	}
 
-	/** Per-user + global daily counters for /identity and /receipts (no mutation). */
-	#demoTurnCounters(): Promise<DailyCapCounters> {
-		const budget = this.#demoBudget();
-		return readDailyCaps(
-			Date.now(),
-			this.#userCounterStore(),
-			this.#capConfig(),
-			budget ? (cap) => budget.counters(cap) : null
-		);
+	/**
+	 * Per-user + global daily counters for /identity and /receipts (no mutation).
+	 *
+	 * Best-effort: these counters are cosmetic, but /identity is session
+	 * bootstrap and /receipts is the live proof poll, so a failing global-cap RPC
+	 * must NOT take either down. On any failure it returns null and the caller
+	 * omits the counters (the wire field is optional; the UI hides the line)
+	 * rather than surfacing a 5xx.
+	 */
+	async #demoTurnCounters(): Promise<DailyCapCounters | null> {
+		try {
+			const budget = this.#demoBudget();
+			return await readDailyCaps(
+				Date.now(),
+				this.#userCounterStore(),
+				this.#capConfig(),
+				budget ? (cap) => budget.counters(cap) : null
+			);
+		} catch (err) {
+			console.warn('demo-turn counters unavailable — omitting from response', err);
+			return null;
+		}
 	}
 
 	/**
@@ -660,44 +673,75 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 		if (verified.address.toLowerCase() !== principal.toLowerCase())
 			throw new EnvelopeError('envelope signer does not match the session principal');
 
-		// This guard IS the "is this a new turn?" test: a re-submitted envelope
-		// (same workId) already has a record, so neither the daily caps nor the
-		// prepaid batch is charged twice on the idempotent path.
-		if ((await this.ctx.storage.get<WorkRecord>(workKey(verified.workId))) === undefined) {
-			// Daily caps — the demo's real spend bound. Checked and rejected
-			// BEFORE the prepaid decrement, so a capped turn never burns a prepaid
-			// turn. CapExceeded surfaces as HTTP 429 (not 402): a daily cap is not
-			// a top-up the wallet can resolve.
-			const budget = this.#demoBudget();
-			const decision = await applyDailyCaps({
-				isNewTurn: true,
-				now: Date.now(),
-				userStore: this.#userCounterStore(),
-				admitGlobal: budget ? (cap) => budget.admit(cap) : null,
-				config: this.#capConfig()
-			});
-			if (!decision.ok) throw new CapExceeded(decision.scope, decision.used, decision.cap);
+		// Admission (new-turn detection → cap/prepaid metering → record write)
+		// runs under the input gate held closed, so two concurrent submits of the
+		// SAME envelope cannot both pass the "new turn?" test: the first persists
+		// the record before the second reads it. Without this, the gate reopens on
+		// the cross-DO global-cap RPC await, and the race would double-count the
+		// caps and double-decrement the prepaid batch. The callback RETURNS the
+		// reject reason instead of throwing — a throw inside blockConcurrencyWhile
+		// resets the whole DO — so refusals are raised afterwards.
+		const outcome = await this.ctx.blockConcurrencyWhile(
+			async (): Promise<
+				| { reject: null }
+				| { reject: 'cap'; scope: 'user' | 'global'; used: number; cap: number }
+				| { reject: 'exhausted' }
+			> => {
+				// The record's presence IS the "is this a new turn?" test: a
+				// re-submitted envelope (same workId) already has one, so the caps
+				// and the prepaid batch are never charged twice on the idempotent
+				// path.
+				const isNewTurn =
+					(await this.ctx.storage.get<WorkRecord>(workKey(verified.workId))) === undefined;
+				if (isNewTurn) {
+					// Daily caps — the demo's real spend bound. Checked and rejected
+					// BEFORE the prepaid decrement, so a capped turn never burns a
+					// prepaid turn. A cap refusal becomes HTTP 429 (not 402): a daily
+					// cap is not a top-up the wallet can resolve.
+					const budget = this.#demoBudget();
+					if (!budget)
+						// The global cap is the only real spend bound (identities are
+						// free). Absent binding = per-user cap only; log it so the guard
+						// can never silently disappear from a deployed environment.
+						console.warn('DEMO_BUDGET unbound — global daily spend cap NOT enforced');
+					const decision = await applyDailyCaps({
+						isNewTurn: true,
+						now: Date.now(),
+						userStore: this.#userCounterStore(),
+						admitGlobal: budget ? (cap) => budget.admit(cap) : null,
+						config: this.#capConfig()
+					});
+					if (!decision.ok)
+						return { reject: 'cap', scope: decision.scope, used: decision.used, cap: decision.cap };
 
-			// Prepaid-turn metering (W4c): each NEW admitted turn spends one turn
-			// of the purchased batch, before any work runs. Refuse at zero and
-			// start the top-up purchase so the browser finds a fresh challenge.
-			const balance = await this.#prepaidTurns();
-			if (balance !== null) {
-				if (balance <= 0) {
-					await this.#beginTopUp();
-					throw new TurnsExhausted();
+					// Prepaid-turn metering (W4c): each NEW admitted turn spends one
+					// turn of the purchased batch, before any work runs. Refuse at zero
+					// and start the top-up purchase so the browser finds a fresh
+					// challenge.
+					const balance = await this.#prepaidTurns();
+					if (balance !== null) {
+						if (balance <= 0) {
+							await this.#beginTopUp();
+							return { reject: 'exhausted' };
+						}
+						await this.ctx.storage.put(PREPAID_TURNS_KEY, balance - 1);
+					}
 				}
-				await this.ctx.storage.put(PREPAID_TURNS_KEY, balance - 1);
+				// Reserve the record inside the gate so a concurrent same-workId
+				// submit sees it. Overwrites unconditionally, matching the prior
+				// resubmit-resets-to-submitted behavior.
+				const record: WorkRecord = {
+					workId: verified.workId,
+					envelopeB64,
+					state: 'submitted',
+					submittedAt: Date.now()
+				};
+				await this.ctx.storage.put(workKey(verified.workId), record);
+				return { reject: null };
 			}
-		}
-
-		const record: WorkRecord = {
-			workId: verified.workId,
-			envelopeB64,
-			state: 'submitted',
-			submittedAt: Date.now()
-		};
-		await this.ctx.storage.put(workKey(verified.workId), record);
+		);
+		if (outcome.reject === 'cap') throw new CapExceeded(outcome.scope, outcome.used, outcome.cap);
+		if (outcome.reject === 'exhausted') throw new TurnsExhausted();
 
 		const submission = await this.submitMessages(
 			[
