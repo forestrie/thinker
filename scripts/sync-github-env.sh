@@ -269,6 +269,14 @@ set_var PUBLIC_KNOWN_SEALER_KEY "${KNOWN_SEALER_KEY:-z1YarLKXrsRe5egrwrFfbeYadd9
 # PUBLIC_SCRIBE_BASE is deliberately ABSENT: unset is what selects same-origin,
 # and same-origin is what makes the scribe worker the single public front door.
 
+# --- deploy.yml's smoke job -------------------------------------------------
+# The account's workers.dev zone. deploy.yml derives the front-door URL from
+# this rather than scraping wrangler's stdout: the deploy job holds secrets, and
+# GitHub silently drops job outputs containing a secret value, so a job in that
+# position must not be the channel for anything downstream needs. Deriving it
+# also means smoke asserts against the URL we INTENDED.
+set_var WORKERS_DEV_ZONE "${WORKERS_DEV_ZONE:-robinbryce.workers.dev}"
+
 say ""
 say "secrets from doppler and .provision (overwritten on every run — they have"
 say "an upstream source of truth, so drift means the upstream moved)"

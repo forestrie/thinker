@@ -96,6 +96,7 @@ jobs:
           VAR_USER_GRANT_BATCH_TURNS: ${{ vars.USER_GRANT_BATCH_TURNS }}
           VAR_PUBLIC_DELEGATION_COORDINATOR_URL: ${{ vars.PUBLIC_DELEGATION_COORDINATOR_URL }}
           VAR_PUBLIC_KNOWN_SEALER_KEY: ${{ vars.PUBLIC_KNOWN_SEALER_KEY }}
+          VAR_WORKERS_DEV_ZONE: ${{ vars.WORKERS_DEV_ZONE }}
           VAR_DEV_AUTH: ${{ vars.DEV_AUTH }}
           VAR_PUBLIC_SCRIBE_BASE: ${{ vars.PUBLIC_SCRIBE_BASE }}
           VAR_GRANT_AUTHORITY_URL: ${{ vars.GRANT_AUTHORITY_URL }}
@@ -114,7 +115,8 @@ jobs:
                       KEY_PROVIDER AGENT_KEY_EPOCH ATTESTATION_MODE MODEL_ID \
                       ROOT_LOG_ID AGENT_AUTH_LOG_ID USER_AUTH_LOG_ID \
                       AGENT_AUTH_GRANT_B64 USER_AUTH_GRANT_B64 USER_GRANT_BATCH_TURNS \
-                      PUBLIC_DELEGATION_COORDINATOR_URL PUBLIC_KNOWN_SEALER_KEY; do
+                      PUBLIC_DELEGATION_COORDINATOR_URL PUBLIC_KNOWN_SEALER_KEY \
+                      WORKERS_DEV_ZONE; do
             vn="VAR_$name"
             [ -n "${!vn}" ] || note "variable $name is not set in environment '${{ inputs.environment }}'"
           done
@@ -257,8 +259,12 @@ jobs:
     needs: services
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
-    outputs:
-      url: ${{ steps.deploy.outputs.url }}
+    # No `outputs:` here, deliberately. This job touches secrets, and GitHub
+    # silently drops any job output that contains a secret value — so a job in
+    # that position must not be the channel for anything downstream depends on.
+    # The front door URL is config, not a deploy artefact: smoke derives it from
+    # WORKERS_DEV_ZONE, which also means it asserts against the URL we INTENDED
+    # rather than one scraped back out of wrangler's stdout.
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -293,7 +299,6 @@ jobs:
             | pnpm exec wrangler secret bulk --env ${{ inputs.environment }}
 
       - name: Deploy
-        id: deploy
         working-directory: apps/scribe-worker
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -310,10 +315,7 @@ jobs:
             --var AGENT_KEY_EPOCH:'${{ vars.AGENT_KEY_EPOCH }}' \
             --var ATTESTATION_MODE:'${{ vars.ATTESTATION_MODE }}' \
             --var MODEL_ID:'${{ vars.MODEL_ID }}' \
-            | tee deploy.log
-          url=$(grep -oE 'https://[a-z0-9.-]+\.workers\.dev' deploy.log | head -1)
-          echo "url=$url" >> "$GITHUB_OUTPUT"
-          echo "deployed: $url"
+          echo "deployed: https://thinker-${{ inputs.environment }}.${{ vars.WORKERS_DEV_ZONE }}"
 
   # -------------------------------------------------------------------- smoke
   # Asserts the SAFETY properties, not that the demo works — a full product loop
@@ -325,12 +327,12 @@ jobs:
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
     env:
-      URL: ${{ needs.worker.outputs.url }}
+      URL: https://thinker-${{ inputs.environment }}.${{ vars.WORKERS_DEV_ZONE }}
+      ZONE: ${{ vars.WORKERS_DEV_ZONE }}
       DEMO_PASSWORD: ${{ secrets.DEMO_PASSWORD }}
     steps:
       - name: The demo gate is closed
         run: |
-          [ -n "$URL" ] || { echo "::error::worker job produced no URL"; exit 1; }
           code=$(curl -s -o /dev/null -w '%{http_code}' "$URL/")
           [ "$code" = 401 ] || { echo "::error::expected 401 from $URL/, got $code"; exit 1; }
           echo "gate closed: 401"
@@ -380,12 +382,9 @@ jobs:
       # own subdomain, the demo gate is decoration.
       - name: Bound services are not publicly reachable
         run: |
-          # thinker-dev.robinbryce.workers.dev -> robinbryce.workers.dev
-          zone=${URL#https://}
-          zone=${zone#*.}
           fail=0
           for svc in thinker-ui thinker-grant-authority; do
-            host="$svc-${{ inputs.environment }}.$zone"
+            host="$svc-${{ inputs.environment }}.$ZONE"
             # A workers.dev host with no public target answers 404 (or DNS
             # fails); anything that answers 200 is a hole.
             code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "https://$host/healthz" || echo 000)
