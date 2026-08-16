@@ -31,6 +31,8 @@ declare global {
 		 */
 		AUTHORITY?: Fetcher;
 		Scribe: DurableObjectNamespace<Scribe>;
+		// DEMO_BUDGET (the global spend-bound DO) is declared on ScribeEnv —
+		// optional there so a bare dev shell still chats — and inherited here.
 	}
 }
 

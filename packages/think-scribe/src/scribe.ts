@@ -1,6 +1,29 @@
 import { createAnthropic } from '@ai-sdk/anthropic';
-import { Think, type ThinkModel } from '@cloudflare/think';
+import { Think, type ThinkModel, type TurnConfig, type TurnContext } from '@cloudflare/think';
 import type { Connection, ConnectionContext } from 'agents';
+import {
+	applyDailyCaps,
+	parseCap,
+	readDailyCaps,
+	type AdmitResult,
+	type CapConfig,
+	type CapStatus,
+	type CounterStore,
+	type DailyCapCounters
+} from './demo-cap.ts';
+
+/**
+ * The RPC surface the global spend-bound DO exposes to the per-user DO. Kept as
+ * a narrow interface so this file never depends on the full DemoBudget/Agent
+ * type — resolving that generic through a Durable Object stub blows the
+ * TypeScript instantiation depth.
+ */
+interface DemoBudgetRpc {
+	/** Atomic check-and-increment of today's global counter. */
+	admit(cap: number): Promise<AdmitResult>;
+	/** Today's global counter, read-only. */
+	counters(cap: number): Promise<CapStatus & { date: string }>;
+}
 import { DoResidentKeyProvider } from './keys/do-resident.ts';
 import { KmsSeedKeyProvider, localSeedCustodianMac } from './keys/kms-seed.ts';
 import { bytesToHex, type KeyProvider } from './keys/provider.ts';
@@ -29,8 +52,20 @@ import { isPermittedClientFrame } from './ws-frames.ts';
 export interface ScribeEnv extends Cloudflare.Env {
 	/** Anthropic API key (secret: .dev.vars locally, `wrangler secret put` in prod). */
 	ANTHROPIC_API_KEY: string;
-	/** Model override; defaults to claude-sonnet-5 (plan §11 O2). */
+	/** Model override; defaults to {@link DEFAULT_MODEL_ID} (claude-haiku-4-5). */
 	MODEL_ID?: string;
+	/**
+	 * The global daily spend bound. One named instance (`idFromName('global')`)
+	 * holds the global daily turn counter; the Scribe DO reaches it over this
+	 * binding to hard-cap total Anthropic spend across all users. Optional so a
+	 * bare dev shell (no binding) still chats — then only the per-user cap
+	 * applies.
+	 */
+	DEMO_BUDGET?: DurableObjectNamespace;
+	/** Global daily turn cap. Default {@link DEFAULT_DEMO_DAILY_TURN_CAP}. */
+	DEMO_DAILY_TURN_CAP?: string;
+	/** Per-user daily turn cap. Default {@link DEFAULT_DEMO_USER_DAILY_TURN_CAP}. */
+	DEMO_USER_DAILY_TURN_CAP?: string;
 	/**
 	 * Base64 32-byte AES-GCM key-encryption key for the DO-resident agent
 	 * signing key (C2). Secret. Spike S1: workerd cannot persist a CryptoKey
@@ -93,7 +128,27 @@ export interface ScribeEnv extends Cloudflare.Env {
 	FORESTRIE_ROOT_PUBLIC_KEY_XY?: string;
 }
 
-export const DEFAULT_MODEL_ID = 'claude-sonnet-5';
+/**
+ * Local dev default. Matched to what ships (deployed environments set
+ * `MODEL_ID=claude-haiku-4-5`) so local behavior and cost track production
+ * rather than a pricier default masking cost regressions. 200K context is ample
+ * for this demo.
+ */
+export const DEFAULT_MODEL_ID = 'claude-haiku-4-5';
+
+/**
+ * Global daily turn cap default. At roughly $0.004/turn with prompt caching,
+ * ~500 turns is a low-single-digit-dollar/day ceiling. Overridable via
+ * `DEMO_DAILY_TURN_CAP`.
+ */
+export const DEFAULT_DEMO_DAILY_TURN_CAP = 500;
+
+/**
+ * Per-user daily turn cap default. Identities are free, so this is fairness
+ * only, not a spend control — the global cap is the real bound. Overridable via
+ * `DEMO_USER_DAILY_TURN_CAP`.
+ */
+export const DEFAULT_DEMO_USER_DAILY_TURN_CAP = 50;
 
 /**
  * Header carrying the wcc-1-verified principal `sub` from the Worker edge
@@ -264,12 +319,42 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 	 * subclasses or later milestones may return any AI-SDK `LanguageModel`
 	 * or a Workers-AI / AI-Gateway model id string.
 	 *
-	 * Sonnet 5 note: sampling params (`temperature`/`top_p`) are rejected by
-	 * the model — steer with the system prompt, not sampling.
+	 * Prompt caching (the bigger cost lever) is applied in {@link beforeTurn},
+	 * not here — `cache_control` rides on message parts, not the model handle.
 	 */
 	getModel(): ThinkModel {
 		const anthropic = createAnthropic({ apiKey: this.env.ANTHROPIC_API_KEY });
 		return anthropic(this.env.MODEL_ID ?? DEFAULT_MODEL_ID);
+	}
+
+	/**
+	 * Prompt caching. Think re-sends the whole transcript every turn; with no
+	 * cache breakpoint the entire prefix bills as fresh input.
+	 * Marking the last assembled message tells the Anthropic provider to cache
+	 * everything BEFORE it — tools, the system prompt, and the transcript prefix
+	 * — so the next turn reads that prefix instead of re-billing it. It pays
+	 * twice: cache reads bill at ~0.1×, AND `cache_read_input_tokens` do not
+	 * count toward the ITPM rate limit. (Verify live: `usage.cache_read_input_tokens`
+	 * non-zero from the second turn on.)
+	 *
+	 * The breakpoint rides on message-level `providerOptions` — the AI-SDK
+	 * Anthropic provider applies a message's `cacheControl` to its last content
+	 * part — so it works whether the content is a string or a parts array, and
+	 * without reaching into part internals.
+	 */
+	beforeTurn(ctx: TurnContext): TurnConfig | void {
+		const messages = ctx.messages;
+		if (messages.length === 0) return;
+		const last = messages[messages.length - 1]!;
+		const priorAnthropic = (last.providerOptions?.anthropic ?? {}) as Record<string, unknown>;
+		const withCache = {
+			...last,
+			providerOptions: {
+				...last.providerOptions,
+				anthropic: { ...priorAnthropic, cacheControl: { type: 'ephemeral' } }
+			}
+		};
+		return { messages: [...messages.slice(0, -1), withCache] };
 	}
 
 	getSystemPrompt(): string {
@@ -521,6 +606,45 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 		return { kid: bytesToHex(keys.kid()), statement, ...accepted };
 	}
 
+	/** The configured daily caps (env overrides, else the defaults above). */
+	#capConfig(): CapConfig {
+		return {
+			userCap: parseCap(this.env.DEMO_USER_DAILY_TURN_CAP, DEFAULT_DEMO_USER_DAILY_TURN_CAP),
+			globalCap: parseCap(this.env.DEMO_DAILY_TURN_CAP, DEFAULT_DEMO_DAILY_TURN_CAP)
+		};
+	}
+
+	/** This DO's storage as the per-user daily counter store (Scribe-local). */
+	#userCounterStore(): CounterStore {
+		return {
+			get: (key) => this.ctx.storage.get<number>(key),
+			put: (key, value) => this.ctx.storage.put(key, value)
+		};
+	}
+
+	/**
+	 * The global spend-bound DO, reached over the DEMO_BUDGET binding at the
+	 * single `global` name — NOT through the agent lobby, which only routes
+	 * `user-<sub>` names. Null when unbound (a bare dev shell): then only the
+	 * per-user cap applies.
+	 */
+	#demoBudget(): DemoBudgetRpc | null {
+		const ns = this.env.DEMO_BUDGET;
+		if (!ns) return null;
+		return ns.get(ns.idFromName('global')) as unknown as DemoBudgetRpc;
+	}
+
+	/** Per-user + global daily counters for /identity and /receipts (no mutation). */
+	#demoTurnCounters(): Promise<DailyCapCounters> {
+		const budget = this.#demoBudget();
+		return readDailyCaps(
+			Date.now(),
+			this.#userCounterStore(),
+			this.#capConfig(),
+			budget ? (cap) => budget.counters(cap) : null
+		);
+	}
+
 	/**
 	 * Turn admission with user attestation (M3, plan §7): verify the signed
 	 * input envelope, bind it to the wcc-1 principal, and durably submit the
@@ -536,12 +660,27 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 		if (verified.address.toLowerCase() !== principal.toLowerCase())
 			throw new EnvelopeError('envelope signer does not match the session principal');
 
-		// Prepaid-turn metering (W4c): each NEW admitted turn spends one turn of
-		// the purchased batch, before any work runs. Refuse at zero and start
-		// the top-up purchase so the browser finds a fresh challenge to pay. A
-		// re-submitted envelope (same workId) is not a new turn — never double-
-		// spend on the idempotent path.
+		// This guard IS the "is this a new turn?" test: a re-submitted envelope
+		// (same workId) already has a record, so neither the daily caps nor the
+		// prepaid batch is charged twice on the idempotent path.
 		if ((await this.ctx.storage.get<WorkRecord>(workKey(verified.workId))) === undefined) {
+			// Daily caps — the demo's real spend bound. Checked and rejected
+			// BEFORE the prepaid decrement, so a capped turn never burns a prepaid
+			// turn. CapExceeded surfaces as HTTP 429 (not 402): a daily cap is not
+			// a top-up the wallet can resolve.
+			const budget = this.#demoBudget();
+			const decision = await applyDailyCaps({
+				isNewTurn: true,
+				now: Date.now(),
+				userStore: this.#userCounterStore(),
+				admitGlobal: budget ? (cap) => budget.admit(cap) : null,
+				config: this.#capConfig()
+			});
+			if (!decision.ok) throw new CapExceeded(decision.scope, decision.used, decision.cap);
+
+			// Prepaid-turn metering (W4c): each NEW admitted turn spends one turn
+			// of the purchased batch, before any work runs. Refuse at zero and
+			// start the top-up purchase so the browser finds a fresh challenge.
 			const balance = await this.#prepaidTurns();
 			if (balance !== null) {
 				if (balance <= 0) {
@@ -983,6 +1122,9 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 				alg: 'ES256',
 				keyProvider: this.env.KEY_PROVIDER ?? 'do-resident',
 				attestationMode: this.#attestationMode(),
+				// Daily demo-turn counters. Pinned here at first fetch; the live
+				// values are re-polled from /receipts.
+				demoTurns: await this.#demoTurnCounters(),
 				epoch: (keys as { epoch?: () => number }).epoch?.() ?? 1,
 				kid: bytesToHex(keys.kid()),
 				publicKeyXY: bytesToHex(await keys.publicKeyXY()),
@@ -1025,6 +1167,19 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 				return Response.json({ principal, ...admitted });
 			} catch (err) {
 				if (err instanceof EnvelopeError) return new Response(err.message, { status: 400 });
+				if (err instanceof CapExceeded)
+					// 429, not 402: a daily cap is not a top-up the wallet can pay off
+					// (chat.svelte.ts branches on 402 to offer the proof panel).
+					return Response.json(
+						{
+							error: err.message,
+							capExceeded: true,
+							scope: err.scope,
+							used: err.used,
+							cap: err.cap
+						},
+						{ status: 429 }
+					);
 				if (err instanceof TurnsExhausted)
 					// 402 with a top-up affordance (W4c): the DO has already dropped
 					// the spent grant and re-requested — the client polls up the fresh
@@ -1096,7 +1251,10 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 					userGrantChallenge:
 						(await this.ctx.storage.get<string>(USER_GRANT_CHALLENGE_KEY)) ?? null,
 					// Polled too (W4c): the turns-remaining card tracks the balance live.
-					prepaidTurns: (await this.ctx.storage.get<number>(PREPAID_TURNS_KEY)) ?? null
+					prepaidTurns: (await this.ctx.storage.get<number>(PREPAID_TURNS_KEY)) ?? null,
+					// Live daily-cap counters: /identity is pinned at first fetch, so
+					// the UI reads the moving values from here.
+					demoTurns: await this.#demoTurnCounters()
 				},
 				works: exported
 			});
@@ -1235,6 +1393,21 @@ class ForestrieUnconfigured extends Error {}
 class TurnsExhausted extends Error {
 	constructor() {
 		super('prepaid turns exhausted — top up to continue');
+	}
+}
+
+/**
+ * A daily demo-turn cap is reached. Distinct from {@link TurnsExhausted}: this
+ * is a hard time-boxed bound (429), not a top-up-able balance (402). `scope`
+ * says whether the per-user or the global cap fired.
+ */
+class CapExceeded extends Error {
+	constructor(
+		readonly scope: 'user' | 'global',
+		readonly used: number,
+		readonly cap: number
+	) {
+		super(`daily ${scope} demo-turn cap reached (${used}/${cap})`);
 	}
 }
 

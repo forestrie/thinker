@@ -27,6 +27,20 @@ export interface SessionResponse {
 	exp: number;
 }
 
+/** One daily-cap counter: turns used against a ceiling. */
+export interface DemoTurnStatus {
+	used: number;
+	cap: number;
+}
+
+/** Daily demo-turn counters: per-user (fairness) + global (the real spend bound). */
+export interface DemoTurnCounters {
+	/** UTC day the counters reset on (YYYY-MM-DD). */
+	date: string;
+	user: DemoTurnStatus;
+	global: DemoTurnStatus;
+}
+
 export interface IdentityResponse {
 	principal: string;
 	alg: 'ES256';
@@ -46,6 +60,8 @@ export interface IdentityResponse {
 	userGrantChallenge?: string | null;
 	/** Turns remaining in the purchased batch (W4c); null = unmetered. */
 	prepaidTurns?: number | null;
+	/** Daily demo-turn counters; pinned here at first fetch. */
+	demoTurns?: DemoTurnCounters;
 	/**
 	 * W4d offline parent-policy proof artifacts: the completed user-authority
 	 * creation grant (base64, receipt included) and the forest root public
@@ -98,6 +114,8 @@ export interface ReceiptsExport {
 		userGrantChallenge?: string | null;
 		/** Turns remaining in the purchased batch (W4c); null = unmetered. */
 		prepaidTurns?: number | null;
+		/** Live daily demo-turn counters — polled every refresh. */
+		demoTurns?: DemoTurnCounters;
 	};
 	works: WorkExportWire[];
 }

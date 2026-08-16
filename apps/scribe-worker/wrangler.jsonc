@@ -40,13 +40,20 @@
 	// (Workers AI / AI Gateway) — note `wrangler dev` then needs a Cloudflare
 	// login/API token for the remote AI proxy.
 	"durable_objects": {
-		"bindings": [{ "name": "Scribe", "class_name": "Scribe" }]
+		"bindings": [
+			{ "name": "Scribe", "class_name": "Scribe" },
+			{ "name": "DEMO_BUDGET", "class_name": "DemoBudget" }
+		]
 	},
 
 	// Inheritable: applies to thinker-scribe, -dev and -stage alike. Each script
-	// keeps its OWN applied-migration ledger, so tag "v1" runs exactly once per
-	// script. NEVER edit or renumber v1 — append {"tag":"v2",...} for changes.
-	"migrations": [{ "tag": "v1", "new_sqlite_classes": ["Scribe"] }],
+	// keeps its OWN applied-migration ledger, so a tag runs exactly once per
+	// script. NEVER edit or renumber an existing tag — append a new one.
+	// v2: DemoBudget, the global daily spend-bound DO.
+	"migrations": [
+		{ "tag": "v1", "new_sqlite_classes": ["Scribe"] },
+		{ "tag": "v2", "new_sqlite_classes": ["DemoBudget"] }
+	],
 
 	"observability": {
 		"enabled": true,
@@ -58,9 +65,15 @@
 	// explicit allowlist in .github/workflows/deploy.yml. DEV_AUTH is
 	// deliberately absent here and is not on that allowlist.
 	"vars": {
-		// Model override for getModel(); default is claude-sonnet-5 (plan §11 O2).
-		// Deployed environments set MODEL_ID=claude-haiku-4-5 for cost.
+		// getModel() defaults to claude-haiku-4-5 (DEFAULT_MODEL_ID) — matched to
+		// what deployed environments set, so no override is needed locally.
 		// "MODEL_ID": "claude-haiku-4-5"
+		//
+		// Daily-cap overrides. Unset here → code defaults
+		// (DEFAULT_DEMO_DAILY_TURN_CAP / DEFAULT_DEMO_USER_DAILY_TURN_CAP).
+		// Deployed environments pass them via --var from GitHub Environments.
+		// "DEMO_DAILY_TURN_CAP": "500",
+		// "DEMO_USER_DAILY_TURN_CAP": "50"
 	},
 
 	"env": {
@@ -68,7 +81,10 @@
 			"name": "thinker-dev",
 			"workers_dev": true,
 			"durable_objects": {
-				"bindings": [{ "name": "Scribe", "class_name": "Scribe" }]
+				"bindings": [
+					{ "name": "Scribe", "class_name": "Scribe" },
+					{ "name": "DEMO_BUDGET", "class_name": "DemoBudget" }
+				]
 			},
 			"services": [
 				{ "binding": "UI", "service": "thinker-ui-dev" },
@@ -80,7 +96,10 @@
 			"name": "thinker-stage",
 			"workers_dev": true,
 			"durable_objects": {
-				"bindings": [{ "name": "Scribe", "class_name": "Scribe" }]
+				"bindings": [
+					{ "name": "Scribe", "class_name": "Scribe" },
+					{ "name": "DEMO_BUDGET", "class_name": "DemoBudget" }
+				]
 			},
 			"services": [
 				{ "binding": "UI", "service": "thinker-ui-stage" },

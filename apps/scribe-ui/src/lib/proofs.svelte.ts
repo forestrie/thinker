@@ -12,6 +12,7 @@ import {
 	fetchReceipts,
 	kickReceiptCollection,
 	payUserGrant,
+	type DemoTurnCounters,
 	type IdentityResponse,
 	type ReceiptsExport,
 	type WorkExportWire
@@ -113,6 +114,15 @@ export class ProofPanel {
 	 */
 	get prepaidTurns(): number | null {
 		return this.export?.forestrie.prepaidTurns ?? this.identity?.prepaidTurns ?? null;
+	}
+
+	/**
+	 * Daily demo-turn counters. Read from the polled export first — /identity is
+	 * pinned at first fetch, so its counters go stale while /receipts tracks the
+	 * live values.
+	 */
+	get demoTurns(): DemoTurnCounters | null {
+		return this.export?.forestrie.demoTurns ?? this.identity?.demoTurns ?? null;
 	}
 
 	async refresh(): Promise<void> {

@@ -241,6 +241,13 @@ set_var ATTESTATION_MODE separate
 # Haiku 4.5 at $1/$5 against Sonnet 5's $3/$15. 200K context is ample here.
 set_var MODEL_ID claude-haiku-4-5
 
+# Daily turn caps bound how much the shared demo can spend on Anthropic per day.
+# The global cap is the real bound (free identities mean a per-user cap alone
+# can't stop spend); the per-user cap is only fairness. The worker falls back to
+# code defaults if these are unset, but deploy.yml preflight requires them.
+set_var DEMO_DAILY_TURN_CAP "${DEMO_DAILY_TURN_CAP:-500}"
+set_var DEMO_USER_DAILY_TURN_CAP "${DEMO_USER_DAILY_TURN_CAP:-50}"
+
 # deploy.yml's kill switch. Off for stage by default — see the warning above.
 if [ "$ENVIRONMENT" = stage ]; then
 	set_var ENABLE_DEPLOY "${ENABLE_DEPLOY:-false}"

@@ -1,10 +1,12 @@
 import { routeAgentRequest } from 'agents';
-import { PRINCIPAL_HEADER, Scribe } from '@forestrie/think-scribe';
+import { PRINCIPAL_HEADER, Scribe, DemoBudget } from '@forestrie/think-scribe';
 import { handleAuth, verifySession } from './auth.ts';
 import { demoGate, withoutDemoCredential } from './demo-gate.ts';
 
-// The DO class the wrangler binding + migration refer to.
-export { Scribe };
+// The DO classes the wrangler bindings + migrations refer to. DemoBudget holds
+// the global daily spend bound; it is reached over its binding, never through
+// routeAgentRequest below (the lobby gate only routes user-<sub>).
+export { Scribe, DemoBudget };
 
 /**
  * This worker is the demo's SINGLE PUBLIC ORIGIN. Everything the browser talks
