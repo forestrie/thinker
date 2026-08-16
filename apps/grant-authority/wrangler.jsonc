@@ -42,14 +42,14 @@
 		"dev": {
 			"name": "thinker-grant-authority-dev",
 			"workers_dev": false,
-			"kv_namespaces": [{ "binding": "AUTHORITY", "id": "REPLACE_WITH_DEV_KV_ID" }],
+			"kv_namespaces": [{ "binding": "AUTHORITY", "id": "2d54be9c0f42455eb14bc9765d8276cd" }],
 			"triggers": { "crons": ["*/10 * * * *"] },
 			"vars": {}
 		},
 		"stage": {
 			"name": "thinker-grant-authority-stage",
 			"workers_dev": false,
-			"kv_namespaces": [{ "binding": "AUTHORITY", "id": "REPLACE_WITH_STAGE_KV_ID" }],
+			"kv_namespaces": [{ "binding": "AUTHORITY", "id": "28b09f802ebc42d6b734f8ea1f937f73" }],
 			"triggers": { "crons": ["*/10 * * * *"] },
 			"vars": {}
 		}
