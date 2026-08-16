@@ -27,6 +27,13 @@ const CONTENT_TYPE = 3;
 const KID = 4;
 export const COSE_ALG_KS256 = -65799;
 
+/**
+ * Maximum user input, in UTF-8 bytes. Matches the demo's per-entry retention
+ * budget, and is the only bound on the cost of one turn — see the check in
+ * {@link verifyUserEnvelope}.
+ */
+export const MAX_INPUT_BYTES = 4096;
+
 /** The signed claims inside the envelope payload (canonical JSON). */
 export interface EnvelopeClaims {
 	input: string;
@@ -132,6 +139,13 @@ export async function verifyUserEnvelope(envelope: Uint8Array): Promise<Verified
 		typeof claims.nonce !== 'string'
 	)
 		throw new EnvelopeError('envelope claims must be {input, sessionId, issuedAt, nonce}');
+	// Bound the input HERE, at the last point before admission, because this is
+	// what actually caps the cost of a single turn: nothing downstream limits
+	// prompt length, transcript growth or output length, so an unbounded input
+	// is an unbounded bill. Measured in UTF-8 bytes, not JS characters, so an
+	// emoji-heavy prompt cannot smuggle 4x past a length check.
+	if (new TextEncoder().encode(claims.input).length > MAX_INPUT_BYTES)
+		throw new EnvelopeError(`envelope input exceeds ${MAX_INPUT_BYTES} bytes`);
 
 	// Hash the VIEW, not `envelope.buffer` — .buffer is the whole backing store,
 	// so any Uint8Array with a non-zero byteOffset (or shorter than its buffer)

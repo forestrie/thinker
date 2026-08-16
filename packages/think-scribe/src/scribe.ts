@@ -20,6 +20,7 @@ import {
 import { DelegateError, delegateSealing } from './forestrie/delegate.ts';
 import { EnvelopeError, verifyUserEnvelope } from './forestrie/envelope.ts';
 import { buildWorkStatementPayload, sha256Hex, type CommittedStep } from './attestation.ts';
+import { isPermittedClientFrame } from './ws-frames.ts';
 
 /**
  * Bindings the Scribe needs from its hosting Worker. The app's generated
@@ -223,6 +224,42 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 	#keys?: Promise<KeyProvider>;
 
 	/**
+	 * Close the raw-WebSocket turn path.
+	 *
+	 * Think accepts `cf_agent_use_chat_request` frames over the socket and feeds
+	 * the client's `messages` array straight to the model
+	 * (`_handleChatRequest`). That bypasses EVERYTHING this agent exists to do:
+	 * no signed envelope, no `workId`, no prepaid-turn decrement, no daily cap,
+	 * no attestation — a turn from a browser console, unmetered and unattested.
+	 * `cf_agent_chat_clear` is nearly as bad: it wipes the transcript that
+	 * `GET /receipts` compares the committed `outputHash` against, which is the
+	 * exact check the tamper beat demonstrates.
+	 *
+	 * ‼️ This MUST be a constructor re-wrap, not a method override. Think wraps
+	 * `this.onMessage` in its own constructor and dispatches protocol events
+	 * from the wrapper — so a `onMessage` method on this class would be
+	 * captured as the wrapper's INNER callback and never see a `chat-request`
+	 * at all. Wrapping after `super()` puts this filter outermost, where it can
+	 * actually see the raw frame first.
+	 *
+	 * Allowlist rather than denylist, because the legitimate surface is tiny and
+	 * known: the browser client sends exactly two frames — a resume probe on
+	 * connect and its ACK (`apps/scribe-ui/src/lib/chat.svelte.ts:168,228`).
+	 * Everything the user can legitimately do flows through `POST /turn`.
+	 */
+	constructor(ctx: DurableObjectState, env: Env) {
+		super(ctx, env);
+		const inner = this.onMessage.bind(this);
+		this.onMessage = async (connection: Connection, message: string | ArrayBuffer) => {
+			if (typeof message === 'string' && !isPermittedClientFrame(message)) {
+				console.warn('scribe: dropped a non-permitted client frame');
+				return;
+			}
+			return inner(connection, message);
+		};
+	}
+
+	/**
 	 * Anthropic via the AI-SDK provider (plan §11 O2). Swappable by design:
 	 * subclasses or later milestones may return any AI-SDK `LanguageModel`
 	 * or a Workers-AI / AI-Gateway model id string.
@@ -398,6 +435,29 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 		await this.ctx.storage.delete(USER_GRANT_B64_KEY);
 		await this.ctx.storage.delete(USER_LOG_ID_KEY);
 		await this.schedule(0, 'acquireUserGrant', {});
+	}
+
+	/**
+	 * Is `candidate` a URL on the configured lane?
+	 *
+	 * Compared by parsed ORIGIN, never by string prefix: `startsWith(baseUrl)`
+	 * is defeated by `https://api-a.forest-2.forestrie.dev.evil.test/…`, and by
+	 * userinfo tricks like `https://api-a.forest-2.forestrie.dev@evil.test/`.
+	 * Parsing both sides and comparing `.origin` collapses port, case and
+	 * userinfo, so only a genuine same-origin URL passes.
+	 */
+	#isLaneUrl(candidate: string): boolean {
+		let laneOrigin: string;
+		try {
+			laneOrigin = new URL(this.#forestrieTarget().baseUrl).origin;
+		} catch {
+			return false;
+		}
+		try {
+			return new URL(candidate).origin === laneOrigin;
+		} catch {
+			return false;
+		}
 	}
 
 	#forestrieTarget(): { baseUrl: string; rootLogId: string } {
@@ -922,32 +982,17 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 			});
 		}
 
-		// M2 write-path harness (S4): sign an arbitrary payload and register it.
-		// The real commitment path (M3) goes onStepFinish → enqueue → drain and
-		// never signs in a request handler; this endpoint exists so the smoke
-		// test can drive T5–T8 end-to-end from workerd.
-		if (request.method === 'POST' && url.pathname.endsWith('/register-test')) {
-			try {
-				const body = (await request.json()) as { payload?: unknown; sub?: string };
-				const payload = new TextEncoder().encode(JSON.stringify(body.payload ?? { probe: 'm2' }));
-				const sub = body.sub ?? `urn:thinker:m2:${crypto.randomUUID()}`;
-				const { statement, ...accepted } = await this.signAndRegister(
-					payload,
-					'application/json',
-					sub
-				);
-				let statementB64 = '';
-				for (const b of statement) statementB64 += String.fromCharCode(b);
-				return Response.json({
-					principal,
-					sub,
-					statementB64: btoa(statementB64),
-					...accepted
-				});
-			} catch (err) {
-				return forestrieProblem(err);
-			}
-		}
+		// REMOVED: the M2 write-path harness `POST …/register-test`.
+		//
+		// It signed an arbitrary caller-supplied payload under an arbitrary
+		// caller-supplied `sub` with the agent key and registered it on the live
+		// lane — i.e. any principal could publish unlimited attacker-authored,
+		// agent-signed leaves, including ones impersonating another user's
+		// `urn:thinker:work:<workId>`. Fine as a local smoke harness, indefensible
+		// on a public origin, and the real commitment path (onStepFinish → enqueue
+		// → drain) never signs in a request handler anyway.
+		//
+		// m2-smoke.mjs drives T5–T8 through `POST /turn` instead.
 
 		// M3 attested turn admission: the user's signed input envelope enters
 		// here; the turn runs durably under workId (plan §7).
@@ -1123,6 +1168,17 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 		if (request.method === 'GET' && url.pathname.endsWith('/registration')) {
 			const statusUrl = url.searchParams.get('status');
 			const receiptUrl = url.searchParams.get('receipt');
+			// Both are caller-supplied and were previously handed straight to
+			// fetch(), with the upstream body returned verbatim — an
+			// authenticated open GET proxy running from Cloudflare egress. Pin
+			// them to the configured lane: these URLs only ever legitimately come
+			// from a Location header that lane issued in the first place.
+			for (const candidate of [statusUrl, receiptUrl]) {
+				if (candidate !== null && !this.#isLaneUrl(candidate))
+					return new Response('status/receipt must be a URL on the configured lane', {
+						status: 400
+					});
+			}
 			try {
 				if (receiptUrl) {
 					const receipt = await fetchReceipt(receiptUrl);
