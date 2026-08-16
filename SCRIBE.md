@@ -8,26 +8,26 @@ detail see the [README](./README.md); the plan of record is
 ## User-facing: what it does and why it matters
 
 **The product in one sentence:** a chat assistant whose conversation is
-*tamper-evident* — you can later prove, to anyone, what was said and what the
+_tamper-evident_ — you can later prove, to anyone, what was said and what the
 agent did, without trusting the operator's word, and without the transcript
 itself ever being published.
 
 What a user experiences:
 
 - **A wallet identity, no signup.** The browser holds a key; signing in is a
-  signature, not a password. Your address *is* your identity, and your own
+  signature, not a password. Your address _is_ your identity, and your own
   personal agent instance is derived from it — nobody else can reach it.
 - **One activation step.** Before chatting, you sign once to "activate your
-  log" — authorizing the network's sealer to checkpoint a log that *only your
-  key controls*. The UI holds your leaves until you've done this, so nothing
+  log" — authorizing the network's sealer to checkpoint a log that _only your
+  key controls_. The UI holds your leaves until you've done this, so nothing
   of yours is ever committed into a void.
 - **Then just chat.** Every message you send is silently signed by your wallet
-  and admitted as an *attested work unit*. The agent answers normally —
+  and admitted as an _attested work unit_. The agent answers normally —
   streaming, tools, the usual — but for every turn it also signs a statement
   of what it did: which tools it called (as hashes), what it answered (as a
   hash), bound to exactly the input you signed.
 - **The proof panel** shows each turn's journey: committed → sequenced →
-  receipted, separately for *your* leaf and the *agent's* leaf. "Verify
+  receipted, separately for _your_ leaf and the _agent's_ leaf. "Verify
   offline" runs the full cryptographic verification **in your browser** — no
   server involved, the log doesn't even need to be reachable.
 - **The payoff — the tamper beat:** if anyone (including the operator) later
@@ -49,38 +49,38 @@ statement payload is never stored — only its hash is committed.
 
 **Grants — the authorization model (ARC-0019):**
 
-- *Creation grants* whose `grantData` binds the endorsed signer's key,
+- _Creation grants_ whose `grantData` binds the endorsed signer's key,
   exercising the **issuer ≠ endorsed-signer split**: a grant authority issues
   credentials endorsing keys it doesn't hold — the agent's ES256 kid and the
   user's 20-byte wallet address (KS256) alike.
 - **Counterfactual pre-issue (O5):** the agent's key derives deterministically
-  from a custodian seed + user + epoch, so its kid is knowable *before the
-  agent exists* — the authority pre-issues the grant, and the newborn agent
+  from a custodian seed + user + epoch, so its kid is knowable _before the
+  agent exists_ — the authority pre-issues the grant, and the newborn agent
   simply collects it.
 - Every grant carries its own inclusion receipt — credentials are themselves
   transparency-logged.
 
 **Batch payment for work (x402, plan-2608-09):** the user pays **once** for a
-`maxHeight`-bounded *batch* grant good for N turns, not per message — the 402
+`maxHeight`-bounded _batch_ grant good for N turns, not per message — the 402
 challenge and wallet signature stay entirely off the turn path, so chatting
 runs at normal latency. The requirement is a **parent-grant policy bit**
 (`GF_DERIVED | GF_CHILD_PAYMENT_REQUIRED`), transparency-logged and
 receipt-provable, switchable per hierarchy — not a global config. The topology
 carries the policy: user grants parent under a **bit-carrying** authority log
 (x402-gated), agent grants under a **bit-free** one (ungated) — keeping agents
-free is *topological*, never an operator bypass. Three roles stay independent —
+free is _topological_, never an operator bypass. Three roles stay independent —
 the browser **pays**, the grant authority **registers** (server-side; the
 browser never registers), the grant **endorses** the user's key. The demo is
 honest about the split: `maxHeight` is the hard, on-chain-enforced ceiling on
-*sealed* work; a DO-local `prepaidTurns` counter is the soft per-turn budget,
+_sealed_ work; a DO-local `prepaidTurns` counter is the soft per-turn budget,
 because appends are unmetered. At zero the UI offers a one-click top-up (a fresh
 batch grant, its own provable artifact); the parent's payment policy is
 **verifiable offline** in the browser from the parent grant's own receipt.
 
 **Two-sided attestation, two logs, two trust roots (the demo's thesis):**
 each turn lands as **two leaves** — the user's signed envelope on a log
-*owned by the user's wallet*, and the agent's work statement on a log *owned
-by the agent's key* — cross-referenced by `workId = H(envelope)`, which is
+_owned by the user's wallet_, and the agent's work statement on a log _owned
+by the agent's key_ — cross-referenced by `workId = H(envelope)`, which is
 also the turn's execution idempotency key, so the agent provably ran the work
 it committed to.
 

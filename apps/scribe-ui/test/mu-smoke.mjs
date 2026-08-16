@@ -90,7 +90,10 @@ async function main() {
 		await fetch(`${UI}/auth/session`, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ challenge: chal.challenge, signature: wallet.signPersonal(chal.message) })
+			body: JSON.stringify({
+				challenge: chal.challenge,
+				signature: wallet.signPersonal(chal.message)
+			})
 		})
 	).json();
 	check('session minted (UI signature layout)', typeof sess.token === 'string', sess.sub);
@@ -129,7 +132,11 @@ async function main() {
 	const identity = await (await fetch(`${AGENT}/identity`, { headers: AUTH })).json();
 	check('identity (pinned trust root)', /^[0-9a-f]{128}$/.test(identity.publicKeyXY ?? ''));
 	const exported = await (await fetch(`${AGENT}/receipts`, { headers: AUTH })).json();
-	check('receipts export via proxy', Array.isArray(exported.works), `${exported.works?.length} works`);
+	check(
+		'receipts export via proxy',
+		Array.isArray(exported.works),
+		`${exported.works?.length} works`
+	);
 	const receipted = (exported.works ?? []).filter((w) => w.state === 'receipted');
 	check('persisted M5 work units present', receipted.length > 0, `${receipted.length} receipted`);
 	let verifiedAll = receipted.length > 0;

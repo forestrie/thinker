@@ -28,7 +28,8 @@ export interface WorkVerification extends WorkVerifyResult {
 }
 
 function inFlight(work: WorkExportWire): boolean {
-	const live = (s: string) => s === 'submitted' || s === 'queued' || s === 'registered' || s === 'sequenced';
+	const live = (s: string) =>
+		s === 'submitted' || s === 'queued' || s === 'registered' || s === 'sequenced';
 	return live(work.state) || (work.userLeaf ? live(work.userLeaf.state) : false);
 }
 
@@ -235,8 +236,7 @@ export class ProofPanel {
 		// Keep polling while receipts are in flight, and during onboarding
 		// while grant-at-bind is still creating the user's log (~a minute) —
 		// the activation button waits on its id.
-		const onboarding =
-			this.export?.attestationMode === 'separate' && this.userLogId === null;
+		const onboarding = this.export?.attestationMode === 'separate' && this.userLogId === null;
 		if (!this.anyInFlight && !onboarding) return;
 		this.#pollTimer = setTimeout(() => {
 			void this.refresh();

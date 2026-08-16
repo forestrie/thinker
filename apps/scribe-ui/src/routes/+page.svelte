@@ -66,7 +66,12 @@
 				<Wallet class="size-3" />
 				{shortHex(wallet.address, 6, 4)}
 			</Badge>
-			<Button size="sm" variant="ghost" title="Forget this identity and start fresh" onclick={resetIdentity}>
+			<Button
+				size="sm"
+				variant="ghost"
+				title="Forget this identity and start fresh"
+				onclick={resetIdentity}
+			>
 				<RotateCcw class="size-3.5" />
 			</Button>
 		</div>

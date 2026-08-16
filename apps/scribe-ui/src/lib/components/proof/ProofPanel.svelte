@@ -18,7 +18,12 @@
 			{#if proofs.anyInFlight}
 				<Badge tone="info"><LoaderCircle class="size-3 animate-spin" /> receipts pending</Badge>
 			{/if}
-			<Button size="sm" variant="ghost" disabled={proofs.refreshing} onclick={() => proofs.collectNow()}>
+			<Button
+				size="sm"
+				variant="ghost"
+				disabled={proofs.refreshing}
+				onclick={() => proofs.collectNow()}
+			>
 				<RefreshCw class="size-3.5 {proofs.refreshing ? 'animate-spin' : ''}" />
 				Refresh
 			</Button>
@@ -65,8 +70,8 @@
 			<div class="space-y-2 p-4 text-xs">
 				<p class="text-kumo-subtle">
 					Your signed inputs land as their own leaves on a log <em>owned by your wallet</em>. Only
-					your key can authorize the lane's sealer to checkpoint it — done here, in the browser;
-					the agent never holds your key. Until then your leaves are held, unregistered.
+					your key can authorize the lane's sealer to checkpoint it — done here, in the browser; the
+					agent never holds your key. Until then your leaves are held, unregistered.
 				</p>
 				<div class="flex items-center gap-2">
 					<Button
@@ -93,8 +98,8 @@
 				</div>
 				{#if !sealingReady}
 					<p class="text-kumo-subtle">
-						Your log is being created (it needs a grant from the authority — up to a minute).
-						You can chat meanwhile; your leaves are held until you authorize.
+						Your log is being created (it needs a grant from the authority — up to a minute). You
+						can chat meanwhile; your leaves are held until you authorize.
 					</p>
 				{:else if proofs.delegationDetail}
 					<p class={proofs.delegation === 'error' ? 'text-kumo-danger' : 'text-kumo-subtle'}>
@@ -142,10 +147,9 @@
 		<Card title="Payment policy — provable offline">
 			<div class="space-y-2 p-4 text-xs">
 				<p class="text-kumo-subtle">
-					Your grant's <em>parent</em> — the user-authority log — carries the payment
-					requirement in its own receipted log entry. Verify it here, in the browser, against
-					the forest root key: the price gate is a fact of the log, not a claim of the
-					operator.
+					Your grant's <em>parent</em> — the user-authority log — carries the payment requirement in its
+					own receipted log entry. Verify it here, in the browser, against the forest root key: the price
+					gate is a fact of the log, not a claim of the operator.
 				</p>
 				<div class="flex items-center gap-2">
 					<Button
@@ -175,7 +179,8 @@
 					<ul class="space-y-1 font-mono text-[11px]">
 						{#each proofs.policyResult.checks as check (check.name)}
 							<li class={check.ok ? 'text-kumo-subtle' : 'text-kumo-danger'}>
-								{check.ok ? '✓' : '✗'} {check.name}{check.detail ? ` — ${check.detail}` : ''}
+								{check.ok ? '✓' : '✗'}
+								{check.name}{check.detail ? ` — ${check.detail}` : ''}
 							</li>
 						{/each}
 					</ul>
@@ -201,8 +206,8 @@
 		<div class="min-h-0 flex-1 space-y-2 overflow-y-auto p-3">
 			{#if proofs.works.length === 0}
 				<p class="p-2 text-center text-xs text-kumo-subtle">
-					No committed turns yet. Every message you send becomes a signed, registered,
-					independently verifiable work unit — watch them appear here.
+					No committed turns yet. Every message you send becomes a signed, registered, independently
+					verifiable work unit — watch them appear here.
 				</p>
 			{/if}
 			{#each [...proofs.works].reverse() as work (work.workId)}

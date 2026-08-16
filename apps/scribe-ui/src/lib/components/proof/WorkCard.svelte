@@ -68,7 +68,13 @@
 			</Badge>
 		{/if}
 		{#if work.state === 'receipted'}
-			<Button size="sm" variant="secondary" class="ml-auto" disabled={!canVerify} onclick={onverify}>
+			<Button
+				size="sm"
+				variant="secondary"
+				class="ml-auto"
+				disabled={!canVerify}
+				onclick={onverify}
+			>
 				<BadgeCheck class="size-3.5" />
 				{verification ? 'Re-verify' : 'Verify offline'}
 			</Button>

@@ -6,16 +6,16 @@
  * added. The library owns the optional/required split; this file adds only
  * what the app itself contributes.
  */
-import type { Scribe, ScribeEnv } from "@forestrie/think-scribe";
+import type { Scribe, ScribeEnv } from '@forestrie/think-scribe';
 
 declare global {
-  interface Env extends ScribeEnv {
-    /** wcc-1 session HMAC secret (auth.ts). */
-    SESSION_HMAC_SECRET: string;
-    /** "1" enables `dev:` bearer tokens — local dev only. */
-    DEV_AUTH?: string;
-    Scribe: DurableObjectNamespace<Scribe>;
-  }
+	interface Env extends ScribeEnv {
+		/** wcc-1 session HMAC secret (auth.ts). */
+		SESSION_HMAC_SECRET: string;
+		/** "1" enables `dev:` bearer tokens — local dev only. */
+		DEV_AUTH?: string;
+		Scribe: DurableObjectNamespace<Scribe>;
+	}
 }
 
 export {};

@@ -12,14 +12,7 @@ function head(major: number, arg: number, out: number[]): void {
 	if (arg < 24) out.push(mt | arg);
 	else if (arg < 0x100) out.push(mt | 24, arg);
 	else if (arg < 0x10000) out.push(mt | 25, arg >> 8, arg & 0xff);
-	else
-		out.push(
-			mt | 26,
-			(arg >>> 24) & 0xff,
-			(arg >>> 16) & 0xff,
-			(arg >>> 8) & 0xff,
-			arg & 0xff
-		);
+	else out.push(mt | 26, (arg >>> 24) & 0xff, (arg >>> 16) & 0xff, (arg >>> 8) & 0xff, arg & 0xff);
 }
 
 function encodeInto(value: CborValue, out: number[]): number[] {

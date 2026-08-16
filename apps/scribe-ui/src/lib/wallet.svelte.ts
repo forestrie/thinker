@@ -63,7 +63,9 @@ function transferWithAuthorizationDigest(args: {
 }): Uint8Array {
 	const domainSeparator = keccak_256(
 		concat32([
-			hashType('EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)'),
+			hashType(
+				'EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)'
+			),
 			keccak_256(new TextEncoder().encode(args.domain.name)),
 			keccak_256(new TextEncoder().encode(args.domain.version)),
 			encodeUint256(args.domain.chainId),
