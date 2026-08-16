@@ -1,0 +1,101 @@
+# PR gate. Everything here is hermetic: no Cloudflare account, no Anthropic
+# key, no Forestrie lane.
+#
+# The live smoke scripts (apps/scribe-worker/test/m{1..5}-smoke.mjs,
+# apps/scribe-ui/test/mu-smoke.mjs) need `wrangler dev` + `vite dev` +
+# scripts/authority.sh + .provision/ private keys + a real ANTHROPIC_API_KEY,
+# and each m3/m4/m5 run spends a real model turn. They belong in a separate
+# manually-dispatched workflow with an environment gate, not here — the vitest
+# configs exclude them by both `include` and an explicit `*-smoke.mjs` rule.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# CI is non-mutating — it deploys nothing and writes nothing outside the runner
+# — so superseded runs on the same ref are pure waste.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Lint, typecheck, unit, build
+    runs-on: ubuntu-latest
+    env:
+      WRANGLER_SEND_METRICS: 'false'
+    steps:
+      - uses: actions/checkout@v4
+
+      # No `version:` input on purpose. package.json carries
+      # "packageManager": "pnpm@10.6.5", which action-setup reads — and passing
+      # both is an error. Do NOT copy the estate's `version: 9.6.0`: this
+      # lockfile is pnpm 10, and installing it with 9 fails --frozen-lockfile.
+      - uses: pnpm/action-setup@v4
+
+      # 22.18 rather than the estate's usual 22.14: scripts/derive-agent-kid.mjs
+      # and scripts/verify-receipts.mjs import .ts sources via node type
+      # stripping, which lands unflagged in 22.18.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.18.0
+          cache: pnpm
+
+      # Also runs scribe-ui's `prepare` (svelte-kit sync), which generates
+      # apps/scribe-ui/.svelte-kit/tsconfig.json — the file its tsconfig
+      # extends, and without which the typecheck cannot resolve $env or $lib.
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      # Three separate type environments: think-scribe and scribe-worker under
+      # @cloudflare/workers-types, scribe-ui under svelte-check + lib.dom. The
+      # UI leg is not redundant — lib.dom's BufferSource is stricter, and it
+      # typechecks the same shared sources the workers do.
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Unit tests
+        run: pnpm test
+
+      # Two things tsc cannot catch. `wrangler deploy --dry-run` bundles the
+      # Worker through esbuild and validates wrangler.jsonc including the
+      # Durable Object migration (no Cloudflare credentials needed). `vite build`
+      # is the only thing that exercises the SvelteKit + adapter-cloudflare +
+      # Tailwind v4 pipeline.
+      #
+      # The UI build needs no PUBLIC_* env: it reads $env/dynamic/public, which
+      # is resolved at request time from the deployed Worker's vars, and
+      # +page.ts sets `ssr = false` with no prerender — so nothing is baked in
+      # at build time. Adding placeholders would document a coupling that does
+      # not exist.
+      - name: Build
+        run: pnpm build
+
+  workflows:
+    name: Workflow lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Cheap and self-checking — the first thing it lints is this file. Catches
+      # bad expressions, unknown action inputs and shell quoting in run: blocks
+      # that would otherwise only fail on the branch that triggers them.
+      - name: actionlint
+        run: |
+          set -euo pipefail
+          bash <(curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.12/scripts/download-actionlint.bash) 1.7.12
+          ./actionlint -color
+
+      # Estate convention (arbor, univocity): no job may export secret-derived
+      # data through `outputs:`. Trivially green today because nothing here
+      # touches secrets — which is the point. It becomes a live gate the moment
+      # deploy.yml lands, rather than something remembered afterwards.
+      - uses: forestrie/.github/actions/secret-egress-lint@main

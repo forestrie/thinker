@@ -1,0 +1,99 @@
+/**
+ * Demo gate — one shared, well-known password in front of the whole demo.
+ *
+ * This is NOT authentication and is not a security control. It exists to keep
+ * bots and drive-by traffic off a public endpoint that spends Anthropic tokens.
+ * The password will leak; the daily turn caps and the Anthropic workspace spend
+ * limit are what actually bound the damage. Do not add anything to this file
+ * that assumes otherwise.
+ *
+ * ## Why it passes on "Basic OR a valid session"
+ *
+ * A browser sends exactly ONE `Authorization` header, and an explicit header on
+ * a `fetch()` overrides the credentials the browser would otherwise attach. In
+ * this app that splits cleanly:
+ *
+ *   navigation + assets  → no explicit header → browser attaches `Basic`
+ *   /auth/challenge|session → fetch with no header → browser attaches `Basic`
+ *   /turn, /receipts, …  → fetch sets `Bearer <session>` → Basic is DROPPED
+ *   /agents/… WebSocket  → no header at all; carries `?token=` instead
+ *
+ * So demanding Basic everywhere would break every authenticated API call, and
+ * demanding it on the WebSocket handshake is not even possible from a browser.
+ * Accepting *either* credential is what makes the gate coherent — and it loses
+ * nothing, because a session can only be minted through `/auth/*`, which is
+ * itself reachable only with the Basic credential.
+ *
+ * An unset `DEMO_PASSWORD` leaves the gate open, so `wrangler dev` works with no
+ * ceremony. Deployed environments must set it — `deploy.yml`'s preflight
+ * requires it.
+ */
+import { verifySession, type AuthEnv } from './auth.ts';
+
+export interface DemoGateEnv extends AuthEnv {
+	/** The shared demo password. Unset = gate open (local dev only). */
+	DEMO_PASSWORD?: string;
+}
+
+const REALM = 'thinker demo';
+
+/** Length-independent compare, so a wrong password leaks no timing signal. */
+function constantTimeEquals(a: string, b: string): boolean {
+	if (a.length !== b.length) return false;
+	let diff = 0;
+	for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+	return diff === 0;
+}
+
+/**
+ * The password out of an `Authorization: Basic` header, or null. The username
+ * half is ignored — there is only one credential and no notion of a user here.
+ */
+function basicPassword(request: Request): string | null {
+	const encoded = request.headers.get('authorization')?.match(/^Basic\s+(.+)$/i)?.[1];
+	if (!encoded) return null;
+	let decoded: string;
+	try {
+		decoded = atob(encoded);
+	} catch {
+		return null;
+	}
+	const colon = decoded.indexOf(':');
+	return colon < 0 ? decoded : decoded.slice(colon + 1);
+}
+
+/**
+ * Returns a 401 challenge when the request should be turned away, or null to
+ * let it through.
+ */
+export async function demoGate(request: Request, env: DemoGateEnv): Promise<Response | null> {
+	const password = env.DEMO_PASSWORD;
+	if (!password) return null;
+
+	const supplied = basicPassword(request);
+	if (supplied !== null && constantTimeEquals(supplied, password)) return null;
+
+	// Already inside: an unexpired session can only have come from /auth/*,
+	// which is itself behind the Basic credential.
+	if (await verifySession(request, env)) return null;
+
+	return new Response('This demo is password protected.\n', {
+		status: 401,
+		headers: {
+			'WWW-Authenticate': `Basic realm="${REALM}", charset="UTF-8"`,
+			'Content-Type': 'text/plain; charset=utf-8'
+		}
+	});
+}
+
+/**
+ * Strip the demo credential before a request is forwarded onward (to the UI
+ * worker or the coordinator). The gate consumes it; nothing downstream should
+ * ever see it, and leaving it on would collide with the session bearer.
+ */
+export function withoutDemoCredential(request: Request): Request {
+	if (!request.headers.get('authorization')?.match(/^Basic\s/i)) return request;
+	const forwarded = new Request(request);
+	forwarded.headers.delete('authorization');
+	return forwarded;
+}

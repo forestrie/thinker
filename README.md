@@ -64,7 +64,7 @@ the wallet flow locally. Smoke test: `node test/m1-smoke.mjs` against
 After a turn's work statement registers, the Scribe's own **scheduled task**
 follows sequencing and collects the sealed receipt (T7→T8) — nothing in the
 chat path ever waits on the lane. `GET …/receipts` exports every work unit
-with its verify artifacts plus the DO's *currently claimed* transcript for
+with its verify artifacts plus the DO's _currently claimed_ transcript for
 each turn, and `scripts/verify-receipts.sh` verifies it all **offline** (the
 log absent, trust root = the agent's public key):
 

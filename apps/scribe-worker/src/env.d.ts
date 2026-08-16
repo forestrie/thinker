@@ -6,16 +6,32 @@
  * added. The library owns the optional/required split; this file adds only
  * what the app itself contributes.
  */
-import type { Scribe, ScribeEnv } from "@forestrie/think-scribe";
+import type { Scribe, ScribeEnv } from '@forestrie/think-scribe';
 
 declare global {
-  interface Env extends ScribeEnv {
-    /** wcc-1 session HMAC secret (auth.ts). */
-    SESSION_HMAC_SECRET: string;
-    /** "1" enables `dev:` bearer tokens — local dev only. */
-    DEV_AUTH?: string;
-    Scribe: DurableObjectNamespace<Scribe>;
-  }
+	interface Env extends ScribeEnv {
+		/** wcc-1 session HMAC secret (auth.ts). */
+		SESSION_HMAC_SECRET: string;
+		/** "1" enables `dev:` bearer tokens — local dev only. */
+		DEV_AUTH?: string;
+		/**
+		 * Shared demo password (demo-gate.ts). Unset leaves the gate open, which
+		 * is what makes `wrangler dev` work with no ceremony; deploy.yml's
+		 * preflight requires it for every deployed environment.
+		 */
+		DEMO_PASSWORD?: string;
+		/**
+		 * The SvelteKit UI, service-bound. Absent in local `wrangler dev` (vite
+		 * serves the UI there), so every use must be guarded.
+		 */
+		UI?: Fetcher;
+		/**
+		 * The grant authority, service-bound. Absent in local `wrangler dev`
+		 * (scripts/authority.sh runs it on :8799 there), so guard every use.
+		 */
+		AUTHORITY?: Fetcher;
+		Scribe: DurableObjectNamespace<Scribe>;
+	}
 }
 
 export {};

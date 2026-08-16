@@ -36,7 +36,7 @@ export function buildUserEnvelope(claims: EnvelopeClaims, wallet: DemoWallet): U
 
 /** workId = SHA-256(envelope) — the turn's identity everywhere (plan §7). */
 export async function workIdOf(envelope: Uint8Array): Promise<string> {
-	const digest = await crypto.subtle.digest('SHA-256', envelope.buffer as ArrayBuffer);
+	const digest = await crypto.subtle.digest('SHA-256', envelope as BufferSource);
 	return bytesToHex(new Uint8Array(digest));
 }
 

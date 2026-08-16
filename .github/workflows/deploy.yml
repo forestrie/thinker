@@ -1,0 +1,410 @@
+# Deploy the demo to a named Cloudflare environment.
+#
+# Manual dispatch only. This spends real money (Anthropic turns, Workers Paid)
+# and writes to a live Forestrie lane, so it is never triggered by a push.
+#
+# ## Topology it deploys
+#
+#   thinker-<env>                  scribe worker  — THE SINGLE PUBLIC ORIGIN
+#     ├── Basic-auth demo gate (DEMO_PASSWORD)
+#     ├── /agents/* native WebSocket to the Scribe DO (never proxied)
+#     ├── [binding] UI        -> thinker-ui-<env>              workers_dev:false
+#     └── [binding] AUTHORITY -> thinker-grant-authority-<env> workers_dev:false
+#
+# The two bound services must exist BEFORE the worker that binds them, so they
+# deploy first and in parallel. Neither binds back, so there is no cycle.
+#
+# ## Kill switch
+#
+# Every environment carries an ENABLE_DEPLOY variable. `stage` ships false:
+# there is one provisioned forest, so a stage deploy would share dev's root log,
+# authority logs and authority key. Flipping it to true without a second
+# provision.sh run is a mistake, not a shortcut.
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        type: choice
+        options: [dev, stage]
+        default: dev
+        required: true
+
+permissions:
+  contents: read
+
+# cancel-in-progress is FALSE, unlike CI. A cancelled deploy leaves the estate
+# half-updated — a worker bound to a service that was not deployed, or secrets
+# applied without the code that reads them. Queue instead.
+concurrency:
+  group: deploy-${{ inputs.environment }}
+  cancel-in-progress: false
+
+env:
+  WRANGLER_SEND_METRICS: 'false'
+
+jobs:
+  # ---------------------------------------------------------------- preflight
+  # Fails BEFORE anything is deployed, and reports every problem at once rather
+  # than one per re-run. Presence is not enough — a truncated SCRIBE_KEK or a
+  # root key with the wrong length deploys perfectly and then fails at the first
+  # turn, which is a far more expensive place to find out.
+  preflight:
+    name: Preflight (${{ inputs.environment }})
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Kill switch
+        run: |
+          if [ "${{ vars.ENABLE_DEPLOY }}" != "true" ]; then
+            echo "::error::ENABLE_DEPLOY is not 'true' for '${{ inputs.environment }}'."
+            echo "::error::stage ships disabled on purpose — it shares dev's provisioned forest."
+            exit 1
+          fi
+
+      - name: Required secrets and variables
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          COORDINATOR_APP_TOKEN: ${{ secrets.COORDINATOR_APP_TOKEN }}
+          AUTHORITY_ES256_JWK: ${{ secrets.AUTHORITY_ES256_JWK }}
+          SESSION_HMAC_SECRET: ${{ secrets.SESSION_HMAC_SECRET }}
+          SCRIBE_KEK: ${{ secrets.SCRIBE_KEK }}
+          KMS_SEED_SECRET: ${{ secrets.KMS_SEED_SECRET }}
+          DEMO_PASSWORD: ${{ secrets.DEMO_PASSWORD }}
+          GRANT_AUTHORITY_TOKEN: ${{ secrets.GRANT_AUTHORITY_TOKEN }}
+          VAR_FORESTRIE_BASE_URL: ${{ vars.FORESTRIE_BASE_URL }}
+          VAR_FORESTRIE_ROOT_LOG_ID: ${{ vars.FORESTRIE_ROOT_LOG_ID }}
+          VAR_FORESTRIE_ROOT_PUBLIC_KEY_XY: ${{ vars.FORESTRIE_ROOT_PUBLIC_KEY_XY }}
+          VAR_DELEGATION_COORDINATOR_URL: ${{ vars.DELEGATION_COORDINATOR_URL }}
+          VAR_KNOWN_SEALER_KEY: ${{ vars.KNOWN_SEALER_KEY }}
+          VAR_GRANT_USER_AUTHORITY: ${{ vars.GRANT_USER_AUTHORITY }}
+          VAR_KEY_PROVIDER: ${{ vars.KEY_PROVIDER }}
+          VAR_AGENT_KEY_EPOCH: ${{ vars.AGENT_KEY_EPOCH }}
+          VAR_ATTESTATION_MODE: ${{ vars.ATTESTATION_MODE }}
+          VAR_MODEL_ID: ${{ vars.MODEL_ID }}
+          VAR_ROOT_LOG_ID: ${{ vars.ROOT_LOG_ID }}
+          VAR_AGENT_AUTH_LOG_ID: ${{ vars.AGENT_AUTH_LOG_ID }}
+          VAR_USER_AUTH_LOG_ID: ${{ vars.USER_AUTH_LOG_ID }}
+          VAR_AGENT_AUTH_GRANT_B64: ${{ vars.AGENT_AUTH_GRANT_B64 }}
+          VAR_USER_AUTH_GRANT_B64: ${{ vars.USER_AUTH_GRANT_B64 }}
+          VAR_USER_GRANT_BATCH_TURNS: ${{ vars.USER_GRANT_BATCH_TURNS }}
+          VAR_PUBLIC_DELEGATION_COORDINATOR_URL: ${{ vars.PUBLIC_DELEGATION_COORDINATOR_URL }}
+          VAR_PUBLIC_KNOWN_SEALER_KEY: ${{ vars.PUBLIC_KNOWN_SEALER_KEY }}
+          VAR_WORKERS_DEV_ZONE: ${{ vars.WORKERS_DEV_ZONE }}
+          VAR_DEV_AUTH: ${{ vars.DEV_AUTH }}
+          VAR_PUBLIC_SCRIBE_BASE: ${{ vars.PUBLIC_SCRIBE_BASE }}
+          VAR_GRANT_AUTHORITY_URL: ${{ vars.GRANT_AUTHORITY_URL }}
+        run: |
+          fail=0
+          note() { echo "::error::$*"; fail=1; }
+
+          for name in ANTHROPIC_API_KEY CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID \
+                      COORDINATOR_APP_TOKEN AUTHORITY_ES256_JWK SESSION_HMAC_SECRET \
+                      SCRIBE_KEK KMS_SEED_SECRET DEMO_PASSWORD GRANT_AUTHORITY_TOKEN; do
+            [ -n "${!name}" ] || note "secret $name is not set in environment '${{ inputs.environment }}'"
+          done
+
+          for name in FORESTRIE_BASE_URL FORESTRIE_ROOT_LOG_ID FORESTRIE_ROOT_PUBLIC_KEY_XY \
+                      DELEGATION_COORDINATOR_URL KNOWN_SEALER_KEY GRANT_USER_AUTHORITY \
+                      KEY_PROVIDER AGENT_KEY_EPOCH ATTESTATION_MODE MODEL_ID \
+                      ROOT_LOG_ID AGENT_AUTH_LOG_ID USER_AUTH_LOG_ID \
+                      AGENT_AUTH_GRANT_B64 USER_AUTH_GRANT_B64 USER_GRANT_BATCH_TURNS \
+                      PUBLIC_DELEGATION_COORDINATOR_URL PUBLIC_KNOWN_SEALER_KEY \
+                      WORKERS_DEV_ZONE; do
+            vn="VAR_$name"
+            [ -n "${!vn}" ] || note "variable $name is not set in environment '${{ inputs.environment }}'"
+          done
+
+          # --- shapes, not just presence ---
+
+          # SCRIBE_KEK wraps the DO's signing key as AES-GCM-256; KMS_SEED_SECRET
+          # is the HMAC custodian seed. Both must decode to exactly 32 bytes. A
+          # short one imports fine and fails at first use.
+          for name in SCRIBE_KEK KMS_SEED_SECRET; do
+            v="${!name}"
+            [ -n "$v" ] || continue
+            n=$(printf '%s' "$v" | base64 -d 2>/dev/null | wc -c | tr -d ' ') || n=0
+            [ "$n" = 32 ] || note "$name must be base64 of exactly 32 bytes (decoded $n)"
+          done
+
+          # Uncompressed P-256 x||y, hex. 64 bytes = 128 hex chars.
+          case "${VAR_FORESTRIE_ROOT_PUBLIC_KEY_XY}" in
+            [0-9a-fA-F]*) : ;;
+            *) note "FORESTRIE_ROOT_PUBLIC_KEY_XY must be hex" ;;
+          esac
+          len=${#VAR_FORESTRIE_ROOT_PUBLIC_KEY_XY}
+          [ "$len" = 128 ] || note "FORESTRIE_ROOT_PUBLIC_KEY_XY must be 128 hex chars (got $len)"
+
+          # A private JWK — the public half alone cannot sign a grant.
+          printf '%s' "$AUTHORITY_ES256_JWK" | jq -e '.kty == "EC" and .crv == "P-256" and (.d | length) > 0' >/dev/null \
+            || note "AUTHORITY_ES256_JWK must be a P-256 EC private JWK (needs a 'd' member)"
+
+          # ATTESTATION_MODE=separate is the demo's entire point: the user's
+          # envelope becomes its own independently receipted leaf. 'embed' would
+          # deploy and appear to work while silently removing that property.
+          [ "${VAR_ATTESTATION_MODE}" = separate ] \
+            || note "ATTESTATION_MODE must be 'separate' (got '${VAR_ATTESTATION_MODE}')"
+
+          # kms-seed makes the agent kid derivable offline, which is what lets
+          # the authority pre-issue the agent grant.
+          [ "${VAR_KEY_PROVIDER}" = kms-seed ] \
+            || note "KEY_PROVIDER must be 'kms-seed' (got '${VAR_KEY_PROVIDER}')"
+
+          # --- names that must NOT be set ---
+
+          # DEV_AUTH enables `dev:0x…` bearer tokens. Deployed, that makes every
+          # identity in the demo impersonatable by anyone who guesses the shape.
+          [ -z "${VAR_DEV_AUTH}" ] || note "DEV_AUTH must not be set in a deployed environment"
+
+          # Unset is what selects same-origin, and same-origin is what keeps the
+          # scribe worker the single public front door.
+          [ -z "${VAR_PUBLIC_SCRIBE_BASE}" ] || note "PUBLIC_SCRIBE_BASE must be unset (same-origin)"
+
+          # The authority is reached over a service binding. A URL here means
+          # something is addressing it directly, which it must not be able to.
+          [ -z "${VAR_GRANT_AUTHORITY_URL}" ] || note "GRANT_AUTHORITY_URL must be unset (service binding)"
+
+          [ "$fail" = 0 ] || exit 1
+          echo "preflight: all secrets and variables present and well-formed"
+
+  # ------------------------------------------------------------ bound services
+  # Deployed first and in parallel: the scribe worker binds both, and a service
+  # binding to a Worker that does not exist is a deploy-time error.
+  services:
+    name: ${{ matrix.app }} (${{ inputs.environment }})
+    needs: preflight
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    strategy:
+      fail-fast: true
+      matrix:
+        app: [grant-authority, scribe-ui]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.18.0
+          cache: pnpm
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # scribe-ui must be built before deploy: adapter-cloudflare generates
+      # .svelte-kit/cloudflare/_worker.js, which is what wrangler.jsonc's `main`
+      # points at. The authority needs no build step — wrangler bundles it.
+      - name: Build
+        if: matrix.app == 'scribe-ui'
+        run: pnpm --filter scribe-ui build
+
+      # `secret bulk` is one API call for the whole set, and unlike `secret put`
+      # it does not prompt. Secrets are applied before the deploy so the new code
+      # never runs an instant without them.
+      - name: Secrets — grant-authority
+        if: matrix.app == 'grant-authority'
+        working-directory: apps/grant-authority
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          AUTHORITY_ES256_JWK: ${{ secrets.AUTHORITY_ES256_JWK }}
+          GRANT_AUTHORITY_TOKEN: ${{ secrets.GRANT_AUTHORITY_TOKEN }}
+          COORDINATOR_APP_TOKEN: ${{ secrets.COORDINATOR_APP_TOKEN }}
+        run: |
+          jq -n \
+            --arg jwk "$AUTHORITY_ES256_JWK" \
+            --arg tok "$GRANT_AUTHORITY_TOKEN" \
+            --arg coord "$COORDINATOR_APP_TOKEN" \
+            '{AUTHORITY_ES256_JWK:$jwk, GRANT_AUTHORITY_TOKEN:$tok, COORDINATOR_APP_TOKEN:$coord}' \
+            | pnpm exec wrangler secret bulk --env ${{ inputs.environment }}
+
+      - name: Deploy — grant-authority
+        if: matrix.app == 'grant-authority'
+        working-directory: apps/grant-authority
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          pnpm exec wrangler deploy --env ${{ inputs.environment }} \
+            --var FORESTRIE_BASE_URL:'${{ vars.FORESTRIE_BASE_URL }}' \
+            --var DELEGATION_COORDINATOR_URL:'${{ vars.DELEGATION_COORDINATOR_URL }}' \
+            --var KNOWN_SEALER_KEY:'${{ vars.KNOWN_SEALER_KEY }}' \
+            --var ROOT_LOG_ID:'${{ vars.ROOT_LOG_ID }}' \
+            --var AGENT_AUTH_LOG_ID:'${{ vars.AGENT_AUTH_LOG_ID }}' \
+            --var USER_AUTH_LOG_ID:'${{ vars.USER_AUTH_LOG_ID }}' \
+            --var AGENT_AUTH_GRANT_B64:'${{ vars.AGENT_AUTH_GRANT_B64 }}' \
+            --var USER_AUTH_GRANT_B64:'${{ vars.USER_AUTH_GRANT_B64 }}' \
+            --var USER_GRANT_BATCH_TURNS:'${{ vars.USER_GRANT_BATCH_TURNS }}'
+
+      # The UI holds no secrets. PUBLIC_SCRIBE_BASE is deliberately not passed:
+      # unset selects same-origin.
+      - name: Deploy — scribe-ui
+        if: matrix.app == 'scribe-ui'
+        working-directory: apps/scribe-ui
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          pnpm exec wrangler deploy --env ${{ inputs.environment }} \
+            --var PUBLIC_DELEGATION_COORDINATOR_URL:'${{ vars.PUBLIC_DELEGATION_COORDINATOR_URL }}' \
+            --var PUBLIC_KNOWN_SEALER_KEY:'${{ vars.PUBLIC_KNOWN_SEALER_KEY }}'
+
+  # --------------------------------------------------------------- front door
+  worker:
+    name: scribe-worker (${{ inputs.environment }})
+    needs: services
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    # No `outputs:` here, deliberately. This job touches secrets, and GitHub
+    # silently drops any job output that contains a secret value — so a job in
+    # that position must not be the channel for anything downstream depends on.
+    # The front door URL is config, not a deploy artefact: smoke derives it from
+    # WORKERS_DEV_ZONE, which also means it asserts against the URL we INTENDED
+    # rather than one scraped back out of wrangler's stdout.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.18.0
+          cache: pnpm
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Secrets
+        working-directory: apps/scribe-worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SESSION_HMAC_SECRET: ${{ secrets.SESSION_HMAC_SECRET }}
+          SCRIBE_KEK: ${{ secrets.SCRIBE_KEK }}
+          KMS_SEED_SECRET: ${{ secrets.KMS_SEED_SECRET }}
+          DEMO_PASSWORD: ${{ secrets.DEMO_PASSWORD }}
+          GRANT_AUTHORITY_TOKEN: ${{ secrets.GRANT_AUTHORITY_TOKEN }}
+        run: |
+          jq -n \
+            --arg anthropic "$ANTHROPIC_API_KEY" \
+            --arg session "$SESSION_HMAC_SECRET" \
+            --arg kek "$SCRIBE_KEK" \
+            --arg seed "$KMS_SEED_SECRET" \
+            --arg demo "$DEMO_PASSWORD" \
+            --arg authtok "$GRANT_AUTHORITY_TOKEN" \
+            '{ANTHROPIC_API_KEY:$anthropic, SESSION_HMAC_SECRET:$session, SCRIBE_KEK:$kek,
+              KMS_SEED_SECRET:$seed, DEMO_PASSWORD:$demo, GRANT_AUTHORITY_TOKEN:$authtok}' \
+            | pnpm exec wrangler secret bulk --env ${{ inputs.environment }}
+
+      - name: Deploy
+        working-directory: apps/scribe-worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          pnpm exec wrangler deploy --env ${{ inputs.environment }} \
+            --var FORESTRIE_BASE_URL:'${{ vars.FORESTRIE_BASE_URL }}' \
+            --var FORESTRIE_ROOT_LOG_ID:'${{ vars.FORESTRIE_ROOT_LOG_ID }}' \
+            --var FORESTRIE_ROOT_PUBLIC_KEY_XY:'${{ vars.FORESTRIE_ROOT_PUBLIC_KEY_XY }}' \
+            --var DELEGATION_COORDINATOR_URL:'${{ vars.DELEGATION_COORDINATOR_URL }}' \
+            --var KNOWN_SEALER_KEY:'${{ vars.KNOWN_SEALER_KEY }}' \
+            --var GRANT_USER_AUTHORITY:'${{ vars.GRANT_USER_AUTHORITY }}' \
+            --var KEY_PROVIDER:'${{ vars.KEY_PROVIDER }}' \
+            --var AGENT_KEY_EPOCH:'${{ vars.AGENT_KEY_EPOCH }}' \
+            --var ATTESTATION_MODE:'${{ vars.ATTESTATION_MODE }}' \
+            --var MODEL_ID:'${{ vars.MODEL_ID }}' \
+          echo "deployed: https://thinker-${{ inputs.environment }}.${{ vars.WORKERS_DEV_ZONE }}"
+
+  # -------------------------------------------------------------------- smoke
+  # Asserts the SAFETY properties, not that the demo works — a full product loop
+  # spends money and needs a funded wallet, so it stays manual. What is checked
+  # here is exactly what must never regress silently.
+  smoke:
+    name: Smoke (${{ inputs.environment }})
+    needs: worker
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    env:
+      URL: https://thinker-${{ inputs.environment }}.${{ vars.WORKERS_DEV_ZONE }}
+      ZONE: ${{ vars.WORKERS_DEV_ZONE }}
+      DEMO_PASSWORD: ${{ secrets.DEMO_PASSWORD }}
+    steps:
+      - name: The demo gate is closed
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' "$URL/")
+          [ "$code" = 401 ] || { echo "::error::expected 401 from $URL/, got $code"; exit 1; }
+          echo "gate closed: 401"
+
+      - name: The demo gate opens with the password
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' -u "demo:$DEMO_PASSWORD" "$URL/")
+          [ "$code" = 200 ] || { echo "::error::expected 200 with credentials, got $code"; exit 1; }
+          echo "gate opens: 200"
+
+      # The UI is served THROUGH the service binding, so a static asset proves the
+      # binding works — a 200 on `/` alone could be an error page.
+      - name: The UI is served over the service binding
+        run: |
+          read -r code type < <(curl -s -o /dev/null -w '%{http_code} %{content_type}' -u "demo:$DEMO_PASSWORD" "$URL/favicon.svg")
+          [ "$code" = 200 ] || { echo "::error::favicon.svg returned $code — UI binding is not serving"; exit 1; }
+          echo "UI binding serves assets: $code $type"
+
+      # DEV_AUTH is unset, so a dev: bearer must be rejected. If this ever
+      # returns 200 the entire identity model is bypassable.
+      #
+      # The path matters: /identity, /turn and /receipts are NOT top-level routes
+      # — they are reached through routeAgentRequest at
+      # /agents/scribe/user-<sub>/…, and a bare /identity falls through to the
+      # UI, which would make this assertion pass for the wrong reason.
+      - name: 'dev: bearer tokens are rejected'
+        run: |
+          agent="$URL/agents/scribe/user-0x0000000000000000000000000000000000000000"
+          code=$(curl -s -o /dev/null -w '%{http_code}' -u "demo:$DEMO_PASSWORD" \
+            -H 'Authorization: Bearer dev:0x0000000000000000000000000000000000000000' \
+            "$agent/identity")
+          [ "$code" != 200 ] || { echo "::error::dev: bearer was ACCEPTED — DEV_AUTH is enabled"; exit 1; }
+          echo "dev: bearer rejected ($code)"
+
+      # wcc-1 binds the challenge to the origin that issued it. If this names
+      # anything but the deployed host, sessions minted here verify nowhere.
+      - name: The auth challenge binds the deployed origin
+        run: |
+          host=${URL#https://}
+          body=$(curl -s -u "demo:$DEMO_PASSWORD" -X POST -H 'Content-Type: application/json' \
+            -d '{"address":"0x0000000000000000000000000000000000000000"}' "$URL/auth/challenge")
+          claim=$(printf '%s' "$body" | jq -r .challenge | base64 -d 2>/dev/null | jq -r .domain)
+          [ "$claim" = "$host" ] || { echo "::error::challenge domain '$claim' != '$host'"; exit 1; }
+          echo "challenge binds $claim"
+
+      # The two bound services carry workers_dev:false. If either answers on its
+      # own subdomain, the demo gate is decoration.
+      - name: Bound services are not publicly reachable
+        run: |
+          fail=0
+          for svc in thinker-ui thinker-grant-authority; do
+            host="$svc-${{ inputs.environment }}.$ZONE"
+            # A workers.dev host with no public target answers 404 (or DNS
+            # fails); anything that answers 200 is a hole.
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "https://$host/healthz" || echo 000)
+            if [ "$code" = 200 ]; then
+              echo "::error::$host is publicly reachable (HTTP 200)"
+              fail=1
+            else
+              echo "$host: not publicly reachable ($code)"
+            fi
+          done
+          [ "$fail" = 0 ]
+
+      - name: Summary
+        run: |
+          {
+            echo "### Deployed \`${{ inputs.environment }}\`"
+            echo ""
+            echo "- Front door: $URL"
+            echo "- Model: \`${{ vars.MODEL_ID }}\`  Attestation: \`${{ vars.ATTESTATION_MODE }}\`"
+            echo ""
+            echo "The URL is password gated. Do not share it until Phase C (spend caps)"
+            echo "and Phase D (privacy) have landed."
+          } >> "$GITHUB_STEP_SUMMARY"

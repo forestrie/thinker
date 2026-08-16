@@ -1,6 +1,6 @@
 import { AgentClient } from 'agents/client';
 import { buildUserEnvelope, newTurnClaims, workIdOf } from './envelope.ts';
-import { postTurn, scribeBase } from './scribe-api.ts';
+import { postTurn, scribeBase, ScribeApiError } from './scribe-api.ts';
 import type { ScribeSession } from './session.svelte.ts';
 import type { DemoWallet } from './wallet.svelte.ts';
 import { bytesToB64 } from './utils.ts';
@@ -108,7 +108,13 @@ export class ScribeChat {
 	#session: ScribeSession;
 	#wallet: DemoWallet;
 	#client: AgentClient | null = null;
-	/** In-flight streamed assistant messages, keyed by requestId. */
+	/**
+	 * In-flight streamed assistant messages, keyed by requestId. Private
+	 * bookkeeping, never read from a template: the reactive surface is
+	 * `messages`, and each stream mutates the $state message object it points
+	 * at. A SvelteMap here would add reactivity nothing subscribes to.
+	 */
+	// eslint-disable-next-line svelte/prefer-svelte-reactivity
 	#streams = new Map<string, ChatMessage>();
 
 	/** The chat session id carried in every envelope's claims. */
@@ -373,8 +379,15 @@ export class ScribeChat {
 			if (!admitted.accepted) throw new Error(`turn not accepted: ${admitted.status}`);
 			return workId;
 		} catch (err) {
-			this.turnError = String(err);
+			// 402 = prepaid batch spent (W4c): the DO refused the turn and is
+			// already re-requesting a grant — the proof panel's poll picks up
+			// the fresh challenge (or the top-up button kicks it).
+			this.turnError =
+				err instanceof ScribeApiError && err.status === 402
+					? 'Prepaid turns exhausted — top up in the proof panel to continue.'
+					: String(err);
 			this.awaiting = false;
+			this.onTurnSettled?.();
 			throw err;
 		}
 	}

@@ -25,3 +25,10 @@ AGENT_KEY_EPOCH=1
 GRANT_AUTHORITY_URL=http://localhost:8799
 # O4 user-attestation shape: embed (default) | separate (two leaves per turn).
 ATTESTATION_MODE=separate
+# --- W4d: offline parent-policy proof (plan-2608-09) ---
+# The completed user-authority creation grant (.provision/user-auth-grant.b64,
+# receipt included) and the forest root public key (rootPublicKeyXY from
+# `provision.sh config`) — the browser proves the user grant's parent carries
+# requiresChildPayment, verifying its receipt under the root key.
+GRANT_USER_AUTHORITY=<base64 completed user-authority creation grant>
+FORESTRIE_ROOT_PUBLIC_KEY_XY=<hex 64-byte x||y forest root public key>

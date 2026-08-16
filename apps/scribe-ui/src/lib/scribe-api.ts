@@ -38,6 +38,21 @@ export interface IdentityResponse {
 	agentLogId: string | null;
 	userLogId: string | null;
 	userSealingDelegated?: boolean;
+	/**
+	 * A pending x402 `X-PAYMENT-REQUIRED` challenge (base64) the wallet must
+	 * sign to buy the user grant (plan-2608-09 W4b); null on dark lanes and
+	 * once paid.
+	 */
+	userGrantChallenge?: string | null;
+	/** Turns remaining in the purchased batch (W4c); null = unmetered. */
+	prepaidTurns?: number | null;
+	/**
+	 * W4d offline parent-policy proof artifacts: the completed user-authority
+	 * creation grant (base64, receipt included) and the forest root public
+	 * key (hex 64-byte x||y) that anchors its receipt.
+	 */
+	userAuthorityGrant?: string | null;
+	rootPublicKeyXY?: string | null;
 }
 
 export interface TurnResponse {
@@ -79,6 +94,10 @@ export interface ReceiptsExport {
 		agentLogId: string | null;
 		userLogId: string | null;
 		userSealingDelegated?: boolean;
+		/** Pending x402 challenge (W4b) to sign for the user grant; else null. */
+		userGrantChallenge?: string | null;
+		/** Turns remaining in the purchased batch (W4c); null = unmetered. */
+		prepaidTurns?: number | null;
 	};
 	works: WorkExportWire[];
 }
@@ -157,6 +176,31 @@ export async function confirmUserSealingDelegated(sub: string, token: string): P
 		await fetch(`${agentPath(sub)}/user-sealing-delegated`, {
 			method: 'POST',
 			headers: { Authorization: `Bearer ${token}` }
+		})
+	);
+}
+
+export interface PayUserGrantResponse {
+	principal: string;
+	paid: boolean;
+	userLogId: string;
+}
+
+/**
+ * Complete the x402 user-grant purchase (plan-2608-09 W4b): hand the DO the
+ * wallet-signed `X-PAYMENT`; it forwards to the authority, which resubmits
+ * register-grant and returns the issued grant. Resolves with the new log id.
+ */
+export async function payUserGrant(
+	sub: string,
+	token: string,
+	xPayment: string
+): Promise<PayUserGrantResponse> {
+	return expectJson(
+		await fetch(`${agentPath(sub)}/pay-user-grant`, {
+			method: 'POST',
+			headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+			body: JSON.stringify({ xPayment })
 		})
 	);
 }
