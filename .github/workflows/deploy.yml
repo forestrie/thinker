@@ -380,20 +380,21 @@ jobs:
       # own subdomain, the demo gate is decoration.
       - name: Bound services are not publicly reachable
         run: |
+          # thinker-dev.robinbryce.workers.dev -> robinbryce.workers.dev
+          zone=${URL#https://}
+          zone=${zone#*.}
           fail=0
           for svc in thinker-ui thinker-grant-authority; do
-            for host in "$svc-${{ inputs.environment }}"; do
-              # A workers.dev host that does not exist resolves to a 404/522 or
-              # fails DNS; anything that answers 200 is a hole.
-              code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 \
-                "https://$host.$(echo "$URL" | sed -E 's#https://[^.]+\.##')/healthz" || echo 000)
-              if [ "$code" = 200 ]; then
-                echo "::error::$host is publicly reachable (HTTP 200)"
-                fail=1
-              else
-                echo "$host: not publicly reachable ($code)"
-              fi
-            done
+            host="$svc-${{ inputs.environment }}.$zone"
+            # A workers.dev host with no public target answers 404 (or DNS
+            # fails); anything that answers 200 is a hole.
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "https://$host/healthz" || echo 000)
+            if [ "$code" = 200 ]; then
+              echo "::error::$host is publicly reachable (HTTP 200)"
+              fail=1
+            else
+              echo "$host: not publicly reachable ($code)"
+            fi
           done
           [ "$fail" = 0 ]
 
