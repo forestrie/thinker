@@ -1,9 +1,27 @@
 /**
  * User input envelope (plan §7, D3): the user attests their input by signing
- * a COSE Sign1 over `{ input, sessionId, issuedAt, nonce }` with their wcc-1
- * wallet key. `workId = SHA-256(envelope bytes)` names the work unit and is
- * passed as the turn's durable `submissionId`/`idempotencyKey`, so the agent
+ * a COSE Sign1 over `{ inputHash, sessionId, issuedAt, nonce }` with their
+ * wcc-1 wallet key. `workId = SHA-256(envelope bytes)` names the work unit and
+ * is passed as the turn's durable `submissionId`/`idempotencyKey`, so the agent
  * cannot begin work under a different id than it commits to.
+ *
+ * Phase D redaction: the envelope commits to `inputHash = H(nonce ‖ input)`,
+ * never to the input itself. The plaintext travels to the worker (it has to —
+ * the model must read it) but never to the lane, so the public log holds a
+ * commitment whose opening the user alone keeps. That turns the demo from "a
+ * public log with public contents" into selective disclosure: the user can
+ * prove what they said, to whoever they choose, with the service switched off.
+ *
+ * The salt is mandatory. A bare `H(input)` is guessable for short prompts. The
+ * nonce is already 16 random bytes inside the claims, so it travels with the
+ * envelope and needs no separate custody — the user knows it because it is in
+ * the envelope they keep.
+ *
+ * {@link verifyAttestedInput} is the load-bearing assertion of the whole
+ * scheme: it re-derives `H(nonce ‖ input)` from the plaintext the worker was
+ * handed and refuses the turn unless it equals the signed `inputHash`. Without
+ * it the signature stops binding the text the agent actually runs, and the
+ * causal claim collapses while every UI tick still shows green.
  *
  * Wire profile = canopy's KS256 COSE convention (grant/ks256-verify.ts):
  * protected `{1: -65799 (KS256), 3: content type, 4: 20-byte address}`;
@@ -21,6 +39,7 @@
 import { keccak_256 } from '@noble/hashes/sha3.js';
 import { secp256k1 } from '@noble/curves/secp256k1.js';
 import { cborDecode, cborEncode, type CborMap } from './cbor.ts';
+import { saltedCommitmentHex } from '../attestation.ts';
 
 const ALG = 1;
 const CONTENT_TYPE = 3;
@@ -30,16 +49,32 @@ export const COSE_ALG_KS256 = -65799;
 /**
  * Maximum user input, in UTF-8 bytes. Matches the demo's per-entry retention
  * budget, and is the only bound on the cost of one turn — see the check in
- * {@link verifyUserEnvelope}.
+ * {@link verifyAttestedInput}.
  */
 export const MAX_INPUT_BYTES = 4096;
 
+/** Commitment domain for the user's input (salted by the envelope nonce). */
+export const INPUT_COMMITMENT_DOMAIN = 'thinker/input/v1';
+
+/**
+ * The value the wallet signs in place of the input: `H(nonce ‖ input)`.
+ *
+ * The one and only definition — the browser mirror imports THIS function
+ * rather than re-implementing it, because a redaction scheme with two
+ * implementations of its commitment is a redaction scheme with a drift bug
+ * waiting to produce receipts that verify nowhere.
+ */
+export function inputCommitment(nonce: string, input: string): string {
+	return saltedCommitmentHex(INPUT_COMMITMENT_DOMAIN, nonce, input);
+}
+
 /** The signed claims inside the envelope payload (canonical JSON). */
 export interface EnvelopeClaims {
-	input: string;
+	/** {@link inputCommitment} of the input — the plaintext is NOT in here. */
+	inputHash: string;
 	sessionId: string;
 	issuedAt: string; // ISO 8601
-	nonce: string; // client random, per-envelope
+	nonce: string; // client random, per-envelope — the commitment's salt
 }
 
 export interface VerifiedEnvelope {
@@ -133,19 +168,14 @@ export async function verifyUserEnvelope(envelope: Uint8Array): Promise<Verified
 		throw new EnvelopeError('envelope payload is not JSON');
 	}
 	if (
-		typeof claims.input !== 'string' ||
+		typeof claims.inputHash !== 'string' ||
 		typeof claims.sessionId !== 'string' ||
 		typeof claims.issuedAt !== 'string' ||
 		typeof claims.nonce !== 'string'
 	)
-		throw new EnvelopeError('envelope claims must be {input, sessionId, issuedAt, nonce}');
-	// Bound the input HERE, at the last point before admission, because this is
-	// what actually caps the cost of a single turn: nothing downstream limits
-	// prompt length, transcript growth or output length, so an unbounded input
-	// is an unbounded bill. Measured in UTF-8 bytes, not JS characters, so an
-	// emoji-heavy prompt cannot smuggle 4x past a length check.
-	if (new TextEncoder().encode(claims.input).length > MAX_INPUT_BYTES)
-		throw new EnvelopeError(`envelope input exceeds ${MAX_INPUT_BYTES} bytes`);
+		throw new EnvelopeError('envelope claims must be {inputHash, sessionId, issuedAt, nonce}');
+	if (!/^[0-9a-f]{64}$/.test(claims.inputHash))
+		throw new EnvelopeError('envelope inputHash must be 64 lowercase hex chars');
 
 	// Hash the VIEW, not `envelope.buffer` — .buffer is the whole backing store,
 	// so any Uint8Array with a non-zero byteOffset (or shorter than its buffer)
@@ -158,4 +188,36 @@ export async function verifyUserEnvelope(envelope: Uint8Array): Promise<Verified
 	for (const b of recoveredAddress) address += b.toString(16).padStart(2, '0');
 
 	return { claims, address, workId };
+}
+
+/**
+ * Turn admission's one non-negotiable check (Phase D1): the plaintext handed
+ * to the worker is the plaintext the wallet signed a commitment to.
+ *
+ * ‼️ Every path that feeds the model MUST come through here, not through
+ * {@link verifyUserEnvelope}. The envelope alone proves "this wallet asked for
+ * *something*"; only `H(nonce ‖ input) === claims.inputHash` proves it asked
+ * for THIS. Verify the envelope and skip this, and the receipts still verify,
+ * the ticks still go green, and the statement no longer says anything true
+ * about what the agent ran.
+ *
+ * The size bound is checked FIRST — before any signature recovery or hashing —
+ * because it is what actually caps the cost of a turn: nothing downstream
+ * limits prompt length, transcript growth or output length, so an unbounded
+ * input is an unbounded bill. Measured in UTF-8 bytes, not JS characters, so
+ * an emoji-heavy prompt cannot smuggle 4x past a length check.
+ */
+export async function verifyAttestedInput(
+	envelope: Uint8Array,
+	input: string
+): Promise<VerifiedEnvelope & { input: string }> {
+	if (typeof input !== 'string') throw new EnvelopeError('turn input must be a string');
+	if (new TextEncoder().encode(input).length > MAX_INPUT_BYTES)
+		throw new EnvelopeError(`turn input exceeds ${MAX_INPUT_BYTES} bytes`);
+	const verified = await verifyUserEnvelope(envelope);
+	if (inputCommitment(verified.claims.nonce, input) !== verified.claims.inputHash)
+		throw new EnvelopeError(
+			'submitted input does not open the envelope commitment H(nonce ‖ input)'
+		);
+	return { ...verified, input };
 }

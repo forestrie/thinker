@@ -4,6 +4,7 @@
 	import { ScribeSession } from '$lib/session.svelte.ts';
 	import { ScribeChat } from '$lib/chat.svelte.ts';
 	import { ProofPanel as ProofPanelState } from '$lib/proofs.svelte.ts';
+	import { TurnVault } from '$lib/vault.svelte.ts';
 	import ChatPanel from '$lib/components/chat/ChatPanel.svelte';
 	import ProofPanel from '$lib/components/proof/ProofPanel.svelte';
 	import Badge from '$lib/components/ui/Badge.svelte';
@@ -14,8 +15,11 @@
 
 	const wallet = new DemoWallet();
 	const session = new ScribeSession(wallet);
-	const chat = new ScribeChat(session, wallet);
-	const proofs = new ProofPanelState(session, wallet);
+	// The user's own copy of their prompts (D4). Keyed to the wallet: a reset
+	// identity starts with an empty vault, as it should.
+	const vault = new TurnVault(wallet.address);
+	const chat = new ScribeChat(session, wallet, vault);
+	const proofs = new ProofPanelState(session, wallet, vault);
 
 	// A settled turn means new commitments are in flight — pull the export.
 	chat.onTurnSettled = () => void proofs.refresh();

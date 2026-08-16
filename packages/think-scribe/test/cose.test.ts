@@ -13,8 +13,14 @@ import {
 	parseSignedStatement,
 	verifyStatementSignature
 } from '../src/forestrie/receipt.ts';
-import { buildUserEnvelope } from '../src/forestrie/envelope.ts';
-import { WORK_STATEMENT_TYPE, buildWorkStatementPayload, sha256Hex } from '../src/attestation.ts';
+import { buildUserEnvelope, inputCommitment } from '../src/forestrie/envelope.ts';
+import {
+	WORK_STATEMENT_TYPE,
+	buildWorkStatementPayload,
+	newSaltHex,
+	outputCommitment,
+	sha256Hex
+} from '../src/attestation.ts';
 import type { KeyProvider } from '../src/keys/provider.ts';
 
 const hex = (b: Uint8Array) => [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
@@ -130,7 +136,7 @@ describe('cross-profile and guard rejections', () => {
 	it('rejects a KS256 user envelope — the two COSE profiles must not be confused', () => {
 		const envelope = buildUserEnvelope(
 			{
-				input: 'hi',
+				inputHash: inputCommitment('n', 'hi'),
 				sessionId: 's',
 				issuedAt: '2026-08-16T09:00:00.000Z',
 				nonce: 'n'
@@ -162,8 +168,8 @@ describe('cross-profile and guard rejections', () => {
 describe('work-statement payload', () => {
 	const input = {
 		workId: 'ab'.repeat(32),
-		userEnvelopeB64: 'ZW52ZWxvcGU=',
 		steps: [{ stepNumber: 0, finishReason: 'stop', toolCalls: [], toolResults: [] }],
+		salt: 'ef'.repeat(32),
 		outputHash: 'cd'.repeat(32),
 		leafId: 'leaf-1',
 		requestId: 'req-1'
@@ -173,20 +179,42 @@ describe('work-statement payload', () => {
 		const parsed = JSON.parse(new TextDecoder().decode(buildWorkStatementPayload(input)));
 		expect(parsed.type).toBe(WORK_STATEMENT_TYPE);
 		expect(parsed.workId).toBe(input.workId);
-		expect(parsed.userEnvelope).toBe(input.userEnvelopeB64);
 		expect(parsed.agentChoices).toEqual(input.steps);
 		expect(parsed.outputHash).toBe(input.outputHash);
 		expect(parsed.leafId).toBe(input.leafId);
 		expect(parsed.requestId).toBe(input.requestId);
+		expect(parsed.salt).toBe(input.salt);
 	});
 
-	it('salts every statement — the log is public and H(input) is guessable', () => {
-		// A security invariant with no other guard: two identical inputs must NOT
-		// produce identical payload bytes.
-		const a = JSON.parse(new TextDecoder().decode(buildWorkStatementPayload(input)));
-		const b = JSON.parse(new TextDecoder().decode(buildWorkStatementPayload(input)));
-		expect(a.salt).toMatch(/^[0-9a-f]{64}$/);
-		expect(a.salt).not.toBe(b.salt);
+	it('does NOT embed the user envelope (D2)', () => {
+		// The statement used to carry `userEnvelope`, which — before the envelope
+		// itself was redacted — put the user's plaintext on the public log a
+		// second time. It costs nothing to drop: workId IS SHA-256(envelope), so
+		// naming the workId already names those exact bytes.
+		const parsed = JSON.parse(new TextDecoder().decode(buildWorkStatementPayload(input)));
+		expect(parsed.userEnvelope).toBeUndefined();
+		expect(Object.keys(parsed).sort()).toEqual([
+			'agentChoices',
+			'leafId',
+			'outputHash',
+			'requestId',
+			'salt',
+			'type',
+			'workId'
+		]);
+	});
+
+	it('takes the output commitment over the salt', () => {
+		// A bare sha256(outputText) is brute-forceable for short replies — the
+		// same weakness the envelope nonce fixes on the input side.
+		const text = 'yes.';
+		expect(outputCommitment(input.salt, text)).not.toBe(outputCommitment('00'.repeat(32), text));
+		expect(outputCommitment(input.salt, text)).toBe(outputCommitment(input.salt, text));
+	});
+
+	it('mints a fresh 32-byte salt per statement', () => {
+		expect(newSaltHex()).toMatch(/^[0-9a-f]{64}$/);
+		expect(newSaltHex()).not.toBe(newSaltHex());
 	});
 });
 

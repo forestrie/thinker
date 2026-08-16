@@ -9,7 +9,8 @@ import {
 	EnvelopeError,
 	MAX_INPUT_BYTES,
 	buildUserEnvelope,
-	verifyUserEnvelope,
+	inputCommitment,
+	verifyAttestedInput,
 	type EnvelopeClaims
 } from '../src/forestrie/envelope.ts';
 
@@ -64,39 +65,45 @@ describe('WebSocket frame allowlist', () => {
 
 describe('input size bound', () => {
 	const KEY = new Uint8Array(32).fill(11);
+	const NONCE = 'bm9uY2U';
+	// Phase D: the size bound moved with the plaintext. The envelope no longer
+	// carries the input, so the gate is `verifyAttestedInput` — the same last
+	// point before admission, now checking the body the model would be fed.
 	const claims = (input: string): EnvelopeClaims => ({
-		input,
+		inputHash: inputCommitment(NONCE, input),
 		sessionId: 'session-1',
 		issuedAt: '2026-08-16T09:00:00.000Z',
-		nonce: 'bm9uY2U'
+		nonce: NONCE
 	});
+	const submit = (input: string) =>
+		verifyAttestedInput(buildUserEnvelope(claims(input), KEY), input);
 
 	it('accepts input at exactly the limit', async () => {
-		const envelope = buildUserEnvelope(claims('a'.repeat(MAX_INPUT_BYTES)), KEY);
-		await expect(verifyUserEnvelope(envelope)).resolves.toBeTruthy();
+		await expect(submit('a'.repeat(MAX_INPUT_BYTES))).resolves.toBeTruthy();
 	});
 
 	it('rejects one byte over', async () => {
-		const envelope = buildUserEnvelope(claims('a'.repeat(MAX_INPUT_BYTES + 1)), KEY);
-		await expect(verifyUserEnvelope(envelope)).rejects.toThrow(/exceeds 4096 bytes/);
-		await expect(verifyUserEnvelope(envelope)).rejects.toBeInstanceOf(EnvelopeError);
+		await expect(submit('a'.repeat(MAX_INPUT_BYTES + 1))).rejects.toThrow(/exceeds 4096 bytes/);
+		await expect(submit('a'.repeat(MAX_INPUT_BYTES + 1))).rejects.toBeInstanceOf(EnvelopeError);
 	});
 
 	it('counts UTF-8 BYTES, not JS characters', async () => {
 		// 4-byte emoji: 1100 of them is 1100 chars but 4400 bytes. A character
 		// count would let this through at ~4x the intended budget.
-		const emoji = '😀'.repeat(1100);
+		const emoji = '\u{1F600}'.repeat(1100);
 		expect(emoji.length).toBeLessThan(MAX_INPUT_BYTES);
 		expect(new TextEncoder().encode(emoji).length).toBeGreaterThan(MAX_INPUT_BYTES);
-		await expect(verifyUserEnvelope(buildUserEnvelope(claims(emoji), KEY))).rejects.toThrow(
-			/exceeds 4096 bytes/
-		);
+		await expect(submit(emoji)).rejects.toThrow(/exceeds 4096 bytes/);
 	});
 
-	it('rejects before any signature or model work is attempted', async () => {
-		// The bound is the last gate before admission, so it must fire on a
-		// perfectly valid, correctly signed envelope — validity is not a bypass.
-		const envelope = buildUserEnvelope(claims('x'.repeat(MAX_INPUT_BYTES + 1)), KEY);
-		await expect(verifyUserEnvelope(envelope)).rejects.toThrow(/exceeds/);
+	it('rejects before any signature work is attempted', async () => {
+		// The bound must fire on a perfectly valid, correctly signed envelope —
+		// validity is not a bypass — and before the recovery it would otherwise
+		// pay for. An unsigned 65-byte-signature stub proves the ordering: the
+		// size check refuses it before recovery would have.
+		const oversized = 'x'.repeat(MAX_INPUT_BYTES + 1);
+		await expect(verifyAttestedInput(new Uint8Array([0xff, 0xff]), oversized)).rejects.toThrow(
+			/exceeds/
+		);
 	});
 });

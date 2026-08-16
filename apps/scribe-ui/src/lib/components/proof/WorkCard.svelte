@@ -1,19 +1,21 @@
 <script lang="ts">
-	import { envelopeClaims } from '$lib/cbor.ts';
 	import type { WorkExportWire } from '$lib/scribe-api.ts';
 	import type { WorkVerification } from '$lib/proofs.svelte.ts';
-	import { b64ToBytes, shortHex } from '$lib/utils.ts';
+	import { shortHex } from '$lib/utils.ts';
 	import Badge from '$lib/components/ui/Badge.svelte';
 	import Button from '$lib/components/ui/Button.svelte';
 	import { BadgeCheck, ShieldAlert, ShieldCheck, ShieldX, User, Bot } from '@lucide/svelte';
 
 	let {
 		work,
+		keptInput,
 		verification,
 		canVerify,
 		onverify
 	}: {
 		work: WorkExportWire;
+		/** This browser's own copy of the prompt — the log has only its hash. */
+		keptInput: string | null;
 		verification?: WorkVerification;
 		canVerify: boolean;
 		onverify: () => void;
@@ -31,8 +33,11 @@
 	const userLeafLabel = (state: string) =>
 		state === 'held' ? 'awaiting your authorization' : state;
 
-	const claims = $derived(envelopeClaims(b64ToBytes(work.envelopeB64)));
-	const input = $derived(typeof claims?.input === 'string' ? claims.input : '(unreadable)');
+	// The envelope commits to H(nonce ‖ input) and carries no text, so the only
+	// place a prompt can be read from is this browser's own copy. Absent — a
+	// different browser, cleared storage, an old turn — say so as design, not
+	// breakage: the proof itself is untouched either way.
+	const expiredNote = 'prompt expired — the proof remains verifiable if you kept your copy';
 	const tampered = $derived(
 		verification?.checks.some((c) => c.name === 'transcript-binding' && !c.ok) ?? false
 	);
@@ -40,7 +45,11 @@
 
 <div class="rounded-lg border border-kumo-hairline bg-kumo-base p-3">
 	<div class="flex items-start justify-between gap-2">
-		<p class="line-clamp-2 text-xs text-kumo-default" title={input}>“{input}”</p>
+		{#if keptInput === null}
+			<p class="line-clamp-2 text-xs text-kumo-subtle italic" title={expiredNote}>{expiredNote}</p>
+		{:else}
+			<p class="line-clamp-2 text-xs text-kumo-default" title={keptInput}>“{keptInput}”</p>
+		{/if}
 		{#if verification}
 			{#if verification.ok}
 				<Badge tone="success"><ShieldCheck class="size-3" /> verified</Badge>

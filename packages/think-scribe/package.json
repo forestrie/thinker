@@ -7,6 +7,7 @@
 	"exports": {
 		".": "./src/index.ts",
 		"./forestrie/cbor": "./src/forestrie/cbor.ts",
+		"./forestrie/envelope": "./src/forestrie/envelope.ts",
 		"./forestrie/receipt": "./src/forestrie/receipt.ts",
 		"./forestrie/delegate": "./src/forestrie/delegate.ts"
 	},

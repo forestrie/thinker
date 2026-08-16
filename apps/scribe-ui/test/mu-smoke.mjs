@@ -26,7 +26,10 @@ import { buildUserEnvelope, newTurnClaims, workIdOf } from '../src/lib/envelope.
 import { envelopeClaims } from '../src/lib/cbor.ts';
 import { bytesToB64, bytesToHex, hexToBytes } from '../src/lib/utils.ts';
 import { verifyWorkReceipt } from '@forestrie/think-scribe/forestrie/receipt';
-import { verifyUserEnvelope } from '../../../packages/think-scribe/src/forestrie/envelope.ts';
+import {
+	verifyAttestedInput,
+	verifyUserEnvelope
+} from '../../../packages/think-scribe/src/forestrie/envelope.ts';
 
 const UI = process.env.UI_URL ?? 'http://localhost:5173';
 
@@ -157,8 +160,10 @@ async function main() {
 	}
 	check('all receipted works verify in the UI path', verifiedAll);
 
-	// 5. The UI envelope builder round-trips through the server verifier.
-	const claims = newTurnClaims('Say, in one short sentence, why receipts matter.', 'mu-smoke');
+	// 5. The UI envelope builder round-trips through the server verifier, and
+	// the commitment it signs is the one the server re-derives (Phase D).
+	const input = 'Say, in one short sentence, why receipts matter.';
+	const claims = newTurnClaims(input, 'mu-smoke');
 	const envelope = buildUserEnvelope(claims, wallet);
 	const verified = await verifyUserEnvelope(envelope);
 	check(
@@ -168,13 +173,25 @@ async function main() {
 	);
 	check('workId agrees client/server', (await workIdOf(envelope)) === verified.workId);
 	const reread = envelopeClaims(envelope);
-	check('envelope claims decode for display', reread?.input === claims.input);
+	check('envelope carries the commitment, not the text', reread?.inputHash === claims.inputHash);
+	check('envelope carries NO plaintext', !JSON.stringify(reread).includes('receipts matter'));
+	check(
+		'the plaintext opens the commitment server-side',
+		(await verifyAttestedInput(envelope, input)).input === input
+	);
+	let refused = false;
+	try {
+		await verifyAttestedInput(envelope, `${input} (edited)`);
+	} catch {
+		refused = true;
+	}
+	check('a substituted plaintext is REFUSED', refused);
 
 	// 6. A fresh attested turn streams to the connected WS client.
 	const turn = await fetch(`${AGENT}/turn`, {
 		method: 'POST',
 		headers: { ...AUTH, 'Content-Type': 'application/json' },
-		body: JSON.stringify({ envelopeB64: bytesToB64(envelope) })
+		body: JSON.stringify({ envelopeB64: bytesToB64(envelope), input })
 	});
 	const turnBody = await turn.json().catch(async () => ({ err: await turn.text() }));
 	check('attested turn admitted via proxy', turn.ok && turnBody.accepted, turnBody.status);

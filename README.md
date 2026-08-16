@@ -76,8 +76,9 @@ scripts/verify-receipts.sh --url http://localhost:8787/agents/scribe/user-<sub> 
 Checks per work unit: the user's KS256 envelope signature, the agent's ES256
 statement signature, the receipt (inclusion proof + sealed checkpoint +
 delegation cert via `@forestrie/receipt-verify`), `workId = H(envelope)`
-binding, and **transcript-binding** — the DO's claimed output hashes to what
-the receipt committed. That last one is the demo beat:
+binding, **input-binding** when the export is a proof bundle (see below), and
+**transcript-binding** — the DO's claimed output hashes to what the receipt
+committed. That last one is the demo beat:
 
 ```sh
 # 1. chat, wait for state=receipted, verify → all pass
@@ -90,6 +91,33 @@ scripts/verify-receipts.sh …   # ✘ transcript-binding — the record was tam
 Smoke test: `node test/m4-smoke.mjs` against `pnpm dev` (runs a real attested
 turn, waits for DO-driven collection, verifies, and proves divergence on a
 tampered export).
+
+## Privacy: commit the hash, not the prompt
+
+The log holds **commitments, not words**. The wallet signs
+`inputHash = H(nonce ‖ input)` — the plaintext goes to the worker, because the
+model must read it, and stops there. The work statement no longer embeds the
+envelope (`workId ≡ SHA-256(envelope)` already binds it), and `outputHash` is
+salted by the statement's own salt. Nothing on the outbound path carries text.
+
+Two consequences the code enforces:
+
+- **Admission re-derives the commitment.** `verifyAttestedInput` refuses the
+  turn unless `H(nonce ‖ input)` equals the signed `inputHash`. Skip that and
+  the signature stops binding what the agent ran while every tick stays green —
+  it is the load-bearing line of the whole scheme.
+- **The user keeps the opening.** The browser stores
+  `{workId, input, envelopeB64}` in localStorage and can export a **proof
+  bundle** — the `/receipts` export plus those openings — which
+  `scripts/verify-receipts.sh --export <bundle>` verifies offline, forever,
+  with the service switched off. "Delete my messages" clears the local copies
+  only; log entries are permanent by design.
+
+Per-user retention is bounded and expiring (1000 records, 4 KB per input, one
+week). The sweep runs daily from the `DemoBudget` DO — which holds no text —
+and deletes work records, Think transcript rows, the FTS mirror, compaction
+summaries and durable submissions past the window. An interval schedule on
+`Scribe` itself would wake every idle user's instance forever.
 
 ## Milestones
 

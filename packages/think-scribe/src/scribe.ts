@@ -1,6 +1,6 @@
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { Think, type ThinkModel, type TurnConfig, type TurnContext } from '@cloudflare/think';
-import type { Connection, ConnectionContext } from 'agents';
+import { getAgentByName, type Agent, type Connection, type ConnectionContext } from 'agents';
 import {
 	applyDailyCaps,
 	parseCap,
@@ -19,8 +19,12 @@ import {
  * TypeScript instantiation depth.
  */
 interface DemoBudgetRpc {
-	/** Atomic check-and-increment of today's global counter. */
-	admit(cap: number): Promise<AdmitResult>;
+	/**
+	 * Atomic check-and-increment of today's global counter. `sub` registers the
+	 * principal for the retention sweep (D3) — the budget DO is the only place
+	 * that knows which per-user instances exist.
+	 */
+	admit(cap: number, sub?: string): Promise<AdmitResult>;
 	/** Today's global counter, read-only. */
 	counters(cap: number): Promise<CapStatus & { date: string }>;
 }
@@ -41,8 +45,20 @@ import {
 	ScrapiError
 } from './forestrie/register.ts';
 import { DelegateError, delegateSealing } from './forestrie/delegate.ts';
-import { EnvelopeError, verifyUserEnvelope } from './forestrie/envelope.ts';
-import { buildWorkStatementPayload, sha256Hex, type CommittedStep } from './attestation.ts';
+import { EnvelopeError, verifyAttestedInput } from './forestrie/envelope.ts';
+import {
+	buildWorkStatementPayload,
+	newSaltHex,
+	outputCommitment,
+	sha256Hex,
+	type CommittedStep
+} from './attestation.ts';
+import {
+	WORK_INDEX_PREFIX,
+	parseWorkIndexKey,
+	planRetentionSweep,
+	workIndexKey
+} from './retention.ts';
 import { isPermittedClientFrame } from './ws-frames.ts';
 
 /**
@@ -218,6 +234,13 @@ interface WorkRecord {
 	submittedAt: number;
 	/** Present from "queued": the assembled per-turn commitment. */
 	steps?: CommittedStep[];
+	/**
+	 * The statement's salt (D2), minted when the turn is queued because the
+	 * committed `outputHash` is taken over it. Carried in the payload, so an
+	 * auditor holding the statement can re-derive the hash from the text.
+	 */
+	salt?: string;
+	/** {@link outputCommitment}(salt, outputText) — never a bare hash (D2). */
 	outputHash?: string;
 	leafId?: string;
 	requestId?: string;
@@ -357,13 +380,25 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 		return { messages: [...messages.slice(0, -1), withCache] };
 	}
 
+	/**
+	 * D5: this told users something false. It claimed "only hashes are logged"
+	 * while the plaintext prompt reached the lane twice over — inside the signed
+	 * envelope and again embedded in the work statement. After D1/D2 the claim
+	 * is true, and the wording now says what is actually committed rather than
+	 * gesturing at it.
+	 */
 	getSystemPrompt(): string {
 		return [
-			'You are the Scribe, a careful assistant whose conversation is',
-			'committed to a public transparency log: the user signs their input,',
-			'and you sign your own choices and outputs. Only hashes are logged —',
-			'never the transcript itself. Answer plainly and note, when asked,',
-			'that this conversation is being made tamper-evident.'
+			'You are the Scribe, a careful assistant whose conversation is made',
+			'tamper-evident on a public transparency log. What is published is',
+			'commitments, not words: the user signs H(nonce ‖ their message), you',
+			'sign a salted hash of your reply plus a record of your own choices.',
+			'The message text itself never leaves this instance — the user keeps',
+			'the opening to their commitment and can prove what they said to',
+			'anyone, later, without us. Message text here is not retained long',
+			'term (about a week), so tell users to keep their own copy and to',
+			'avoid posting personal information. Answer plainly, and explain any',
+			'of this accurately when asked.'
 		].join(' ');
 	}
 
@@ -622,16 +657,36 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 		};
 	}
 
+	/** Cached budget stub, resolved once per wake by {@link #demoBudget}. */
+	#budget?: Promise<DemoBudgetRpc | null>;
+
 	/**
 	 * The global spend-bound DO, reached over the DEMO_BUDGET binding at the
 	 * single `global` name — NOT through the agent lobby, which only routes
 	 * `user-<sub>` names. Null when unbound (a bare dev shell): then only the
 	 * per-user cap applies.
+	 *
+	 * ‼️ Addressed with `getAgentByName`, not a raw `ns.get(idFromName(…))`.
+	 * A user-defined RPC method does not pass through `Server.fetch`, which is
+	 * where the SDK would otherwise initialize the instance — so a raw stub
+	 * gives a DO whose `onStart` never runs and whose name is never persisted.
+	 * That was invisible while this only incremented a counter, and silently
+	 * fatal the moment `onStart` became where the retention sweep is scheduled
+	 * (D3): counters kept working, and nothing was ever swept.
+	 *
+	 * Resolved once per wake and cached — stubs are location-independent
+	 * handles, safe to reuse — so the extra init RPC is paid once, not per turn.
 	 */
-	#demoBudget(): DemoBudgetRpc | null {
-		const ns = this.env.DEMO_BUDGET;
-		if (!ns) return null;
-		return ns.get(ns.idFromName('global')) as unknown as DemoBudgetRpc;
+	#demoBudget(): Promise<DemoBudgetRpc | null> {
+		this.#budget ??= (async () => {
+			const ns = this.env.DEMO_BUDGET;
+			if (!ns) return null;
+			return (await getAgentByName(
+				ns as unknown as DurableObjectNamespace<Agent<ScribeEnv>>,
+				'global'
+			)) as unknown as DemoBudgetRpc;
+		})();
+		return this.#budget;
 	}
 
 	/**
@@ -645,7 +700,7 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 	 */
 	async #demoTurnCounters(): Promise<DailyCapCounters | null> {
 		try {
-			const budget = this.#demoBudget();
+			const budget = await this.#demoBudget();
 			return await readDailyCaps(
 				Date.now(),
 				this.#userCounterStore(),
@@ -659,19 +714,33 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 	}
 
 	/**
-	 * Turn admission with user attestation (M3, plan §7): verify the signed
-	 * input envelope, bind it to the wcc-1 principal, and durably submit the
-	 * turn under `workId = H(envelope)` — submissionId AND idempotencyKey —
-	 * so the agent cannot run work under a different id than it commits to.
+	 * Turn admission with user attestation (M3, plan §7; redacted in D1):
+	 * verify the signed input envelope, check that the submitted plaintext
+	 * OPENS the envelope's `H(nonce ‖ input)` commitment, bind it to the wcc-1
+	 * principal, and durably submit the turn under `workId = H(envelope)` —
+	 * submissionId AND idempotencyKey — so the agent cannot run work under a
+	 * different id than it commits to.
+	 *
+	 * `input` is the plaintext, which reaches this worker and no further: the
+	 * envelope registered on the lane carries only the commitment.
 	 */
 	async admitAttestedTurn(
 		envelopeB64: string,
+		input: string,
 		principal: string
 	): Promise<{ workId: string; accepted: boolean; status: string }> {
 		const envelope = decodeBase64(envelopeB64);
-		const verified = await verifyUserEnvelope(envelope);
+		// ‼️ verifyAttestedInput, never verifyUserEnvelope: this is where the
+		// signature is bound to the text the model is about to be fed. It throws
+		// before anything is spent or stored.
+		const verified = await verifyAttestedInput(envelope, input);
 		if (verified.address.toLowerCase() !== principal.toLowerCase())
 			throw new EnvelopeError('envelope signer does not match the session principal');
+
+		// Resolved BEFORE the gate closes: addressing the budget DO costs an init
+		// RPC on the first call of each wake, and the input gate should be held
+		// for the metering, not for connection setup.
+		const budget = await this.#demoBudget();
 
 		// Admission (new-turn detection → cap/prepaid metering → record write)
 		// runs under the input gate held closed, so two concurrent submits of the
@@ -698,7 +767,6 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 					// BEFORE the prepaid decrement, so a capped turn never burns a
 					// prepaid turn. A cap refusal becomes HTTP 429 (not 402): a daily
 					// cap is not a top-up the wallet can resolve.
-					const budget = this.#demoBudget();
 					if (!budget)
 						// The global cap is the only real spend bound (identities are
 						// free). Absent binding = per-user cap only; log it so the guard
@@ -708,7 +776,10 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 						isNewTurn: true,
 						now: Date.now(),
 						userStore: this.#userCounterStore(),
-						admitGlobal: budget ? (cap) => budget.admit(cap) : null,
+						// The principal rides along so the budget DO can register this
+						// instance for the retention sweep (D3) — it is the only place
+						// that knows which per-user DOs exist.
+						admitGlobal: budget ? (cap) => budget.admit(cap, principal) : null,
 						config: this.#capConfig()
 					});
 					if (!decision.ok)
@@ -737,6 +808,10 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 					submittedAt: Date.now()
 				};
 				await this.ctx.storage.put(workKey(verified.workId), record);
+				// Time-ordered index for the retention sweep (D3): `work:` keys sort
+				// by hash. A resubmit writes a second index row for the same workId —
+				// harmless, the sweep deletes by workId and drops stale rows it finds.
+				await this.ctx.storage.put(workIndexKey(record.submittedAt, record.workId), 1);
 				return { reject: null };
 			}
 		);
@@ -748,7 +823,9 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 				{
 					id: crypto.randomUUID(),
 					role: 'user' as const,
-					parts: [{ type: 'text' as const, text: verified.claims.input }]
+					// The verified plaintext: `verifyAttestedInput` returned it only
+					// after proving it opens the signed commitment.
+					parts: [{ type: 'text' as const, text: verified.input }]
 				}
 			],
 			{
@@ -834,7 +911,12 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 			.map((p) => p.text)
 			.join('');
 		matched.steps = steps;
-		matched.outputHash = await sha256Hex(new TextEncoder().encode(outputText));
+		// Salt the output commitment (D2). The salt is minted here rather than
+		// inside the payload builder because the hash is taken OVER it: a bare
+		// sha256(outputText) is brute-forceable for short replies, the same
+		// weakness D1 fixes on the input side.
+		matched.salt = newSaltHex();
+		matched.outputHash = outputCommitment(matched.salt, outputText);
 		matched.leafId = result.message.id;
 		matched.requestId = result.requestId;
 		matched.state = 'queued';
@@ -892,8 +974,8 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 			try {
 				const payload = buildWorkStatementPayload({
 					workId: record.workId,
-					userEnvelopeB64: record.envelopeB64,
 					steps: record.steps ?? [],
+					salt: record.salt ?? '',
 					outputHash: record.outputHash ?? '',
 					leafId: record.leafId ?? '',
 					requestId: record.requestId ?? ''
@@ -1057,6 +1139,104 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 	}
 
 	/**
+	 * Bounded, expiring retention (D3) — called over RPC from the `DemoBudget`
+	 * DO's daily sweep, never on a schedule of this instance's own (an interval
+	 * schedule on `Scribe` would wake every idle user's DO forever).
+	 *
+	 * Deletes, per user and nowhere central:
+	 *  - work records past the 1-week window, and any beyond the 1000-record
+	 *    ceiling, oldest first;
+	 *  - the Think transcript rows and durable submissions older than the same
+	 *    cutoff — that is where the actual words live, and until Phase D
+	 *    nothing in this system ever deleted anything.
+	 *
+	 * Expiry destroying auditability is acceptable ONLY because the browser
+	 * keeps the user's own copy and can export a proof bundle (D4): the receipt
+	 * stays verifiable forever from that bundle, with this service switched off.
+	 *
+	 * Returns what it removed and how much remains — the caller uses `remaining`
+	 * to drop a fully-swept, long-idle instance from its registry so it stops
+	 * being woken.
+	 */
+	async sweepRetention(now = Date.now()): Promise<{
+		expired: number;
+		trimmed: number;
+		remaining: number;
+		transcriptPruned: boolean;
+	}> {
+		const index = await this.ctx.storage.list<number>({ prefix: WORK_INDEX_PREFIX });
+		// A workId can carry more than one index row (a resubmitted envelope
+		// writes a second one), so collapse to the NEWEST timestamp per workId
+		// before planning — otherwise a stale row would expire a record whose
+		// latest submission is still well inside the window, and take the fresh
+		// index row with it.
+		const newest = new Map<string, number>();
+		const keysOf = new Map<string, string[]>();
+		for (const key of index.keys()) {
+			const parsed = parseWorkIndexKey(key);
+			if (!parsed) {
+				await this.ctx.storage.delete(key);
+				continue;
+			}
+			newest.set(parsed.workId, Math.max(newest.get(parsed.workId) ?? 0, parsed.submittedAt));
+			keysOf.set(parsed.workId, [...(keysOf.get(parsed.workId) ?? []), key]);
+		}
+		const entries = [...newest].map(([workId, submittedAt]) => ({ workId, submittedAt }));
+		const plan = planRetentionSweep(entries, now);
+		for (const workId of plan.workIds) {
+			await this.ctx.storage.delete(workKey(workId));
+			for (const key of keysOf.get(workId) ?? []) await this.ctx.storage.delete(key);
+		}
+		const transcriptPruned = this.#pruneTranscript(plan.cutoff);
+		return {
+			expired: plan.expired,
+			trimmed: plan.trimmed,
+			remaining: entries.length - plan.workIds.length,
+			transcriptPruned
+		};
+	}
+
+	/**
+	 * Drop transcript state older than `cutoff` from Think's session store.
+	 *
+	 * Deleting the OLDEST messages is safe with this schema: history is a
+	 * recursive walk from the active leaf up through `parent_id`, so a missing
+	 * ancestor simply ends the walk — the recent tail stays intact and the model
+	 * keeps its near context. Both the FTS mirror and the compaction summaries
+	 * carry the same text and must go with it, as must Think's durable
+	 * submissions, whose `messages_json` holds the raw prompt.
+	 *
+	 * Each statement is separately guarded: these tables belong to the agents
+	 * SDK and Think, are created lazily, and a missing one must not abort the
+	 * sweep for the tables that do exist.
+	 */
+	#pruneTranscript(cutoff: number): boolean {
+		// SQLite DATETIME columns hold 'YYYY-MM-DD HH:MM:SS' in UTC.
+		const stamp = new Date(cutoff).toISOString().replace('T', ' ').slice(0, 19);
+		let deleted = false;
+		const attempt = (run: () => unknown) => {
+			try {
+				run();
+				deleted = true;
+			} catch (err) {
+				console.warn('retention: transcript prune skipped a table', err);
+			}
+		};
+		// The FTS mirror first — it selects the ids from the table the next
+		// statement empties.
+		attempt(
+			() => this.sql`DELETE FROM assistant_fts WHERE id IN (
+				SELECT id FROM assistant_messages WHERE created_at < ${stamp}
+			)`
+		);
+		attempt(() => this.sql`DELETE FROM assistant_messages WHERE created_at < ${stamp}`);
+		attempt(() => this.sql`DELETE FROM assistant_compactions WHERE created_at < ${stamp}`);
+		// Think's submissions store epoch ms, not a DATETIME string.
+		attempt(() => this.sql`DELETE FROM cf_think_submissions WHERE created_at < ${cutoff}`);
+		return deleted;
+	}
+
+	/**
 	 * Schedule the collector unless a FUTURE run is already booked. The dedupe
 	 * must ignore past-due rows: the SDK deletes a one-shot schedule row only
 	 * AFTER its callback completes, so during collectReceipts its own row is
@@ -1205,9 +1385,16 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 		// here; the turn runs durably under workId (plan §7).
 		if (request.method === 'POST' && url.pathname.endsWith('/turn')) {
 			try {
-				const body = (await request.json()) as { envelopeB64?: string };
+				// D1: the envelope carries the COMMITMENT, the body carries the
+				// plaintext. Both are required — the commitment without an opening
+				// is unrunnable, the opening without a commitment is unattested.
+				const body = (await request.json()) as { envelopeB64?: string; input?: string };
 				if (!body.envelopeB64) return new Response('envelopeB64 required', { status: 400 });
-				const admitted = await this.admitAttestedTurn(body.envelopeB64, principal);
+				if (typeof body.input !== 'string')
+					return new Response('input required (the plaintext the envelope commits to)', {
+						status: 400
+					});
+				const admitted = await this.admitAttestedTurn(body.envelopeB64, body.input, principal);
 				return Response.json({ principal, ...admitted });
 			} catch (err) {
 				if (err instanceof EnvelopeError) return new Response(err.message, { status: 400 });
