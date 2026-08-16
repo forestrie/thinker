@@ -10,8 +10,9 @@
 	import Badge from '$lib/components/ui/Badge.svelte';
 	import Button from '$lib/components/ui/Button.svelte';
 	import { shortHex } from '$lib/utils.ts';
+	import { usdcBalance, paymentFromChallenge, BASE_SEPOLIA_USDC } from '$lib/usdc.ts';
 	import ScribeMark from '$lib/components/ScribeMark.svelte';
-	import { Wallet, RotateCcw } from '@lucide/svelte';
+	import { Wallet, RotateCcw, Copy, Check } from '@lucide/svelte';
 
 	const wallet = new DemoWallet();
 	const session = new ScribeSession(wallet);
@@ -24,6 +25,36 @@
 	// A settled turn means new commitments are in flight — pull the export.
 	chat.onTurnSettled = () => void proofs.refresh();
 
+	// Funding aid (paid lane): the browser wallet is the x402 payer, so it must
+	// hold Base Sepolia USDC. Surface a copyable address and the live balance so
+	// the user can fund it from their own wallet and watch it arrive. The exact
+	// token + price come from any parked x402 challenge; else the Base Sepolia
+	// USDC default.
+	let copied = $state(false);
+	let balance = $state<number | null>(null);
+	let balanceError = $state<string | null>(null);
+	const payment = $derived(paymentFromChallenge(proofs.grantChallenge));
+
+	async function copyAddress() {
+		try {
+			await navigator.clipboard.writeText(wallet.address);
+			copied = true;
+			setTimeout(() => (copied = false), 1500);
+		} catch {
+			// Clipboard blocked (insecure context / permissions) — the full
+			// address is still selectable via the title tooltip.
+		}
+	}
+
+	async function refreshBalance() {
+		try {
+			balance = await usdcBalance(wallet.address, payment?.asset ?? BASE_SEPOLIA_USDC);
+			balanceError = null;
+		} catch (err) {
+			balanceError = String(err);
+		}
+	}
+
 	onMount(() => {
 		void (async () => {
 			try {
@@ -34,7 +65,10 @@
 				// session.error / chat.connectionDetail carry the story
 			}
 		})();
+		void refreshBalance();
+		const balanceTimer = setInterval(() => void refreshBalance(), 15_000);
 		return () => {
+			clearInterval(balanceTimer);
 			chat.disconnect();
 			proofs.stop();
 		};
@@ -66,10 +100,33 @@
 			{#if session.error}
 				<Badge tone="danger" title={session.error}>auth failed</Badge>
 			{/if}
-			<Badge tone="neutral" title={wallet.address}>
-				<Wallet class="size-3" />
-				{shortHex(wallet.address, 6, 4)}
+			<!-- USDC balance on Base Sepolia — this wallet pays for grants, so fund
+			     it if it reads 0. Shows the batch price when a challenge is parked. -->
+			<Badge
+				tone={balance !== null && balance === 0 ? 'warning' : 'neutral'}
+				title={balanceError
+					? `balance unavailable: ${balanceError}`
+					: `USDC on Base Sepolia — fund this wallet to buy grants${
+							payment ? ` ($${payment.usdc.toFixed(2)} per batch)` : ''
+						}`}
+			>
+				{balance === null ? '…' : balance.toFixed(2)} USDC
 			</Badge>
+			<!-- Click to copy the full address, so the user can send funds to it. -->
+			<button
+				type="button"
+				onclick={copyAddress}
+				title="Copy full address — {wallet.address}"
+				class="flex items-center gap-1.5 rounded-md border border-kumo-line bg-kumo-recessed px-2 py-1 font-mono text-[11px] text-kumo-default hover:bg-kumo-elevated"
+			>
+				<Wallet class="size-3 text-kumo-subtle" />
+				{shortHex(wallet.address, 6, 4)}
+				{#if copied}
+					<Check class="size-3 text-kumo-success" />
+				{:else}
+					<Copy class="size-3 text-kumo-subtle" />
+				{/if}
+			</button>
 			<Button
 				size="sm"
 				variant="ghost"
