@@ -58,6 +58,8 @@ export interface IdentityResponse {
 	 * once paid.
 	 */
 	userGrantChallenge?: string | null;
+	/** Why the last user-grant acquisition failed, if it did (plan-2608-11). */
+	userGrantError?: string | null;
 	/** Turns remaining in the purchased batch (W4c); null = unmetered. */
 	prepaidTurns?: number | null;
 	/** Daily demo-turn counters; pinned here at first fetch. */

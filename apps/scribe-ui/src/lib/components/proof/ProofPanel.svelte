@@ -117,7 +117,19 @@
 						<Badge tone="warning">activate before chatting</Badge>
 					{/if}
 				</div>
-				{#if !sealingReady}
+				{#if !sealingReady && proofs.userGrantError}
+					<!-- Do NOT fall through to "being created" here: nothing is in
+					     flight, and waiting will not help. The DO retries on a
+					     cooldown, so say what broke and that it is coming back
+					     (plan-2608-11 W4). -->
+					<p class="text-kumo-danger">
+						Your log could not be created: {proofs.userGrantError}
+					</p>
+					<p class="text-kumo-subtle">
+						Retrying automatically. You can chat meanwhile; your leaves are held until you
+						authorize.
+					</p>
+				{:else if !sealingReady}
 					<p class="text-kumo-subtle">
 						Your log is being created (it needs a grant from the authority — up to a minute). You
 						can chat meanwhile; your leaves are held until you authorize.

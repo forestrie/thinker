@@ -1,3 +1,4 @@
+import { shouldRetryUserGrant } from './user-grant-retry.ts';
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { Think, type ThinkModel, type TurnConfig, type TurnContext } from '@cloudflare/think';
 import { getAgentByName, type Agent, type Connection, type ConnectionContext } from 'agents';
@@ -192,6 +193,15 @@ const USER_LOG_ID_KEY = 'forestrie:userLogId';
 const USER_GRANT_CHALLENGE_KEY = 'forestrie:userGrantChallenge';
 /** The purchased grant's batch ceiling (maxHeight) — seeds prepaidTurns (W4c). */
 const USER_GRANT_MAXHEIGHT_KEY = 'forestrie:userGrantMaxHeight';
+/**
+ * When user-grant acquisition was last attempted (epoch ms), and why it last
+ * failed (plan-2608-11). The stamp rate-limits the request-path retry — every
+ * route passes the principal check and the UI polls /receipts every ~7s — and
+ * the error is surfaced on /identity so the browser can say what is wrong
+ * instead of claiming a log is being created.
+ */
+const USER_GRANT_ATTEMPT_AT_KEY = 'forestrie:userGrantAttemptAt';
+const USER_GRANT_ERROR_KEY = 'forestrie:userGrantError';
 /**
  * Turns remaining in the purchased batch (W4c): seeded from the grant's
  * maxHeight when it is stored, decremented per admitted turn, refused at
@@ -521,6 +531,9 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 			// Park the challenge for the browser; stay embed-only until it's paid.
 			await this.ctx.storage.put(USER_GRANT_CHALLENGE_KEY, result.challengeB64);
 			await this.ctx.storage.put(USER_GRANT_MAXHEIGHT_KEY, result.maxHeight);
+			// Reaching a priced 402 is the gate working, not a failure — clear any
+			// error from an earlier attempt so the UI stops reporting it.
+			await this.ctx.storage.delete(USER_GRANT_ERROR_KEY);
 			return null;
 		}
 		return this.#storeUserGrant(result.grant);
@@ -543,6 +556,7 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 		}
 		await this.ctx.storage.delete(USER_GRANT_CHALLENGE_KEY);
 		await this.ctx.storage.delete(USER_GRANT_RENEWAL_KEY);
+		await this.ctx.storage.delete(USER_GRANT_ERROR_KEY);
 		return { grantB64: grant.grantB64, logId: grant.logId };
 	}
 
@@ -1041,10 +1055,16 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 	 * Failures are logged; the drain's request path remains the fallback.
 	 */
 	async acquireUserGrant(): Promise<void> {
+		await this.ctx.storage.put(USER_GRANT_ATTEMPT_AT_KEY, Date.now());
 		try {
 			await this.#userGrant();
 		} catch (err) {
-			console.warn('grant-at-bind user grant acquisition failed — drain will retry', err);
+			// Recorded as well as logged: a console.warn inside the DO is invisible
+			// to the person staring at a disabled button (plan-2608-11 W3). The
+			// request path retries on a cooldown, so this is a status, not a
+			// terminal state.
+			await this.ctx.storage.put(USER_GRANT_ERROR_KEY, String(err));
+			console.warn('user grant acquisition failed — will retry', err);
 		}
 	}
 
@@ -1373,7 +1393,41 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 		}
 		if (bound !== sub)
 			throw new PrincipalError(403, 'principal does not match bound instance owner');
+
+		// Grant-at-bind fires ONCE. When that single attempt failed, the user log
+		// never appeared, "Authorize sealing" stayed disabled, and the only
+		// fallback was the turn drain — but the UI puts activation BEFORE
+		// chatting, so a user following the intended order waited forever
+		// (plan-2608-11 D1; seen on deployed dev with a fresh funded wallet).
+		// Retry here, rate-limited: this runs on EVERY route and the UI polls
+		// /receipts every ~7s.
+		await this.#retryUserGrantIfStuck();
 		return bound;
+	}
+
+	/**
+	 * Re-arm user-grant acquisition for an already-bound principal that still
+	 * has none. Cheap and silent when there is nothing to do — the predicate
+	 * (and its tests) live in user-grant-retry.ts.
+	 */
+	async #retryUserGrantIfStuck(): Promise<void> {
+		if (await this.ctx.storage.get<string>(USER_GRANT_B64_KEY)) return;
+		const retry = shouldRetryUserGrant({
+			attestationMode: this.#attestationMode(),
+			authorityReachable:
+				!!this.env.GRANT_AUTHORITY_URL || !!(this.env as { AUTHORITY?: Fetcher }).AUTHORITY,
+			hasGrant: false,
+			hasParkedChallenge:
+				(await this.ctx.storage.get<string>(USER_GRANT_CHALLENGE_KEY)) !== undefined,
+			lastAttemptAt: (await this.ctx.storage.get<number>(USER_GRANT_ATTEMPT_AT_KEY)) ?? null,
+			now: Date.now()
+		});
+		if (!retry) return;
+		// Stamped here as well as in acquireUserGrant: the scheduled task may not
+		// run for a moment, and without the stamp every request in that window
+		// would queue another one.
+		await this.ctx.storage.put(USER_GRANT_ATTEMPT_AT_KEY, Date.now());
+		await this.schedule(0, 'acquireUserGrant', {});
 	}
 
 	async onConnect(connection: Connection, ctx: ConnectionContext): Promise<void> {
@@ -1417,6 +1471,10 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 				// A pending x402 challenge (W4b) the browser wallet must sign to buy
 				// the user grant; null on dark lanes and once paid.
 				userGrantChallenge: (await this.ctx.storage.get<string>(USER_GRANT_CHALLENGE_KEY)) ?? null,
+				// Why the last acquisition attempt failed, if it did (plan-2608-11).
+				// Non-null means the UI should say so rather than claim the log is
+				// still being created; a retry is already scheduled on a cooldown.
+				userGrantError: (await this.ctx.storage.get<string>(USER_GRANT_ERROR_KEY)) ?? null,
 				// Turns remaining in the purchased batch (W4c); null = unmetered.
 				prepaidTurns: (await this.ctx.storage.get<number>(PREPAID_TURNS_KEY)) ?? null,
 				// W4d offline parent-policy proof: the completed user-authority
