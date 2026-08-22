@@ -124,6 +124,16 @@ export class ProofPanel {
 	 * (the balance moves per turn); null = unmetered (dark lane before any
 	 * grant, or embed mode).
 	 */
+	/**
+	 * Why the Scribe's last attempt to get the user grant failed, if it did.
+	 * Non-null means the "Activate your log" card must say so rather than claim
+	 * the log is still being created — the DO retries on a cooldown, so this is
+	 * a status, not a dead end (plan-2608-11).
+	 */
+	get userGrantError(): string | null {
+		return this.identity?.userGrantError ?? null;
+	}
+
 	get prepaidTurns(): number | null {
 		return this.export?.forestrie.prepaidTurns ?? this.identity?.prepaidTurns ?? null;
 	}
