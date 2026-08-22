@@ -6,6 +6,14 @@ SESSION_HMAC_SECRET=change-me-openssl-rand-base64-32
 SCRIBE_KEK=change-me-openssl-rand-base64-32
 # "1" accepts `dev:<sub>` bearer tokens without a wallet signature. Dev only.
 DEV_AUTH=1
+# The shared Basic-auth demo gate. Leave DEMO_PASSWORD UNSET locally — an unset
+# password leaves the gate open, which is why `wrangler dev` needs no ceremony.
+# Set DEMO_GATE=off to disable the gate EXPLICITLY (integration tests, or when a
+# DEMO_PASSWORD is already in your ambient environment). Only the exact string
+# `off` disables it; anything else leaves the gate up. Never set either here in a
+# deployed environment — deploy.yml's preflight requires DEMO_PASSWORD and
+# rejects DEMO_GATE.
+# DEMO_GATE=off
 # Forestrie write path (M2) — values from `scripts/provision.sh config`:
 # forestrieBaseUrl, R, and the agent grant from .provision/agent-grant.b64.
 FORESTRIE_BASE_URL=https://<lane-scrapi-origin>

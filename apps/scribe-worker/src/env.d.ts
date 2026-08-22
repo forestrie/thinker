@@ -21,6 +21,13 @@ declare global {
 		 */
 		DEMO_PASSWORD?: string;
 		/**
+		 * `off` disables the demo gate outright, even with DEMO_PASSWORD set —
+		 * the explicit switch for local dev and integration tests. Only the exact
+		 * string `off` counts; anything else leaves the gate up. Not on
+		 * deploy.yml's --var allowlist, and its preflight rejects it.
+		 */
+		DEMO_GATE?: string;
+		/**
 		 * The SvelteKit UI, service-bound. Absent in local `wrangler dev` (vite
 		 * serves the UI there), so every use must be guarded.
 		 */

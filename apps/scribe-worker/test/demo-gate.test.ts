@@ -153,6 +153,45 @@ describe('DEMO_PASSWORD unset', () => {
 	});
 });
 
+describe('DEMO_GATE=off', () => {
+	// The point of the explicit switch: a harness can state "no gate" positively,
+	// rather than depending on the absence of a variable it cannot assert.
+	it('opens the gate even when a password IS configured', async () => {
+		const env: DemoGateEnv = { ...ENV, DEMO_GATE: 'off' };
+		expect(await demoGate(new Request(`${BASE}/`), env)).toBeNull();
+	});
+
+	it('opens every path an integration test drives, credential-free', async () => {
+		const env: DemoGateEnv = { ...ENV, DEMO_GATE: 'off' };
+		for (const path of [
+			'/',
+			'/_app/immutable/x.js',
+			'/auth/challenge',
+			'/agents/scribe/user-0xa',
+			'/agents/scribe/user-0xa/turn'
+		]) {
+			expect(await demoGate(new Request(`${BASE}${path}`), env)).toBeNull();
+		}
+	});
+
+	it('tolerates whitespace and case, so OFF and " off " both work', async () => {
+		for (const value of ['OFF', ' off ', 'Off']) {
+			const env: DemoGateEnv = { ...ENV, DEMO_GATE: value };
+			expect(await demoGate(new Request(`${BASE}/`), env)).toBeNull();
+		}
+	});
+
+	// Fail-closed is the whole safety property: an unrecognised value must leave
+	// the gate UP, because a typo in front of a token-spending endpoint should
+	// cost a confusing 401, never an open door.
+	it('leaves the gate up for any value that is not exactly "off"', async () => {
+		for (const value of ['', '0', 'false', 'no', 'disabled', 'offf', 'on', 'true']) {
+			const env: DemoGateEnv = { ...ENV, DEMO_GATE: value };
+			expect((await demoGate(new Request(`${BASE}/`), env))?.status).toBe(401);
+		}
+	});
+});
+
 describe('withoutDemoCredential', () => {
 	it('strips a Basic credential before forwarding', () => {
 		const req = new Request(`${BASE}/`, { headers: { authorization: basic(PASSWORD) } });
