@@ -406,7 +406,12 @@ jobs:
             host="$svc-${{ inputs.environment }}.$ZONE"
             # A workers.dev host with no public target answers 404 (or DNS
             # fails); anything that answers 200 is a hole.
-            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "https://$host/healthz" || echo 000)
+            # `|| true`, not `|| echo 000`: curl -w already prints 000 on a
+            # refused connection, so the echo appends a second one and $code
+            # becomes "000\n000". Harmless here (the test is against 200) but
+            # it garbles the log line, and the idiom must not get copied into
+            # a check that compares against 000.
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "https://$host/healthz" || true)
             if [ "$code" = 200 ]; then
               echo "::error::$host is publicly reachable (HTTP 200)"
               fail=1
