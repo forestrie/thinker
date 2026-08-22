@@ -102,9 +102,19 @@ jobs:
           VAR_DEV_AUTH: ${{ vars.DEV_AUTH }}
           VAR_PUBLIC_SCRIBE_BASE: ${{ vars.PUBLIC_SCRIBE_BASE }}
           VAR_GRANT_AUTHORITY_URL: ${{ vars.GRANT_AUTHORITY_URL }}
+          VAR_DEMO_GATE: ${{ vars.DEMO_GATE }}
         run: |
           fail=0
           note() { echo "::error::$*"; fail=1; }
+
+          # DEMO_GATE=off is the LOCAL/integration-test switch that opens the
+          # demo gate outright. It is not on the --var allowlist below, so it
+          # cannot reach a deployed Worker today — this rejects it at the door
+          # anyway, so that adding it to that allowlist later is a loud mistake
+          # rather than a silently public, token-spending endpoint.
+          if [ -n "$VAR_DEMO_GATE" ]; then
+            note "variable DEMO_GATE is set in environment '${{ inputs.environment }}' — it is a local-only gate override and must never be set for a deployed environment"
+          fi
 
           for name in ANTHROPIC_API_KEY CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID \
                       COORDINATOR_APP_TOKEN AUTHORITY_ES256_JWK SESSION_HMAC_SECRET \
