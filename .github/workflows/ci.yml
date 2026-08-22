@@ -79,6 +79,116 @@ jobs:
       - name: Build
         run: pnpm build
 
+  # Tier 1 integration: the ONLY smoke script that is hermetic. m1 drives the
+  # wcc-1 handshake, per-user DO routing and the authz boundaries against a real
+  # `wrangler dev` — coverage the unit suite cannot reach, because it is exactly
+  # the wiring the unit suite stubs out.
+  #
+  # It stays in the PR gate because it needs no real secret and costs nothing:
+  # only /auth/challenge, /auth/session, /identity and the WebSocket upgrade are
+  # touched. No Forestrie lane, no ANTHROPIC_API_KEY, no .provision/ keys, no
+  # model turn. m2..m5 and mu-smoke are NOT like this — they write to a live lane
+  # and spend real money, so they belong in a dispatched, environment-gated
+  # workflow. Do not add them here.
+  integration:
+    name: Integration (m1, hermetic)
+    runs-on: ubuntu-latest
+    env:
+      WRANGLER_SEND_METRICS: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.18.0
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # Three passes over one running worker each. A single step rather than
+      # three: the passes share a boot helper, and backgrounded processes plus
+      # generated files do not survive a step boundary cleanly.
+      #
+      # Two things learned by running this for real, both of which look like
+      # flakes rather than the config errors they are:
+      #
+      #  * SCRIBE_KEK is generated ONCE, not per pass. It wraps the DO-resident
+      #    signing key, and local state persists across restarts within a job —
+      #    so a second boot with a fresh KEK meets a DO it can no longer unwrap
+      #    and answers 500. `--persist-to` a per-pass temp dir is the belt to
+      #    that braces: isolation without deleting anything (the default
+      #    .wrangler/state is a real working directory on a dev machine, and a
+      #    workflow that rm -rf's it is one copy-paste away from doing so).
+      #  * `curl -w '%{http_code}'` already prints 000 when the connection is
+      #    refused, so the usual `|| echo 000` yields the string "000\n000",
+      #    which compares equal to nothing and breaks the readiness loop on its
+      #    first iteration. `|| true` is what is wanted.
+      - name: m1 against wrangler dev
+        working-directory: apps/scribe-worker
+        run: |
+          set -euo pipefail
+          SESSION_HMAC_SECRET=$(openssl rand -base64 32)
+          SCRIBE_KEK=$(openssl rand -base64 32)
+          pids=""
+          cleanup() { for p in $pids; do kill "$p" 2>/dev/null || true; done; }
+          trap cleanup EXIT
+
+          # $1 = port, remaining lines on stdin = extra .dev.vars entries.
+          boot() {
+            port=$1
+            {
+              echo "SESSION_HMAC_SECRET=$SESSION_HMAC_SECRET"
+              echo "SCRIBE_KEK=$SCRIBE_KEK"
+              echo "DEV_AUTH=1"
+              cat
+            } > .dev.vars
+            nohup pnpm exec wrangler dev --port "$port" \
+              --persist-to "$RUNNER_TEMP/state-$port" \
+              > "$RUNNER_TEMP/wrangler-$port.log" 2>&1 &
+            pids="$pids $!"
+            for _ in $(seq 1 60); do
+              code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 \
+                -X POST "http://127.0.0.1:$port/auth/challenge" || true)
+              [ "$code" != 000 ] && { echo "worker ready on :$port ($code)"; return 0; }
+              sleep 1
+            done
+            echo "::error::wrangler dev never became ready on :$port"
+            cat "$RUNNER_TEMP/wrangler-$port.log" || true
+            return 1
+          }
+
+          echo '--- pass 1: no password — the gate is open by absence ---'
+          boot 8787 </dev/null
+          BASE_URL=http://127.0.0.1:8787 node test/m1-smoke.mjs
+
+          # The gate's escape hatch, end-to-end rather than in a unit stub: with
+          # a password set AND DEMO_GATE=off, every route m1 drives must still
+          # answer credential-free. Integration tests depend on this property,
+          # so it is asserted against a running worker.
+          echo '--- pass 2: password set, DEMO_GATE=off — still wide open ---'
+          boot 8788 <<EOF
+          DEMO_PASSWORD=$(openssl rand -base64 12)
+          DEMO_GATE=off
+          EOF
+          BASE_URL=http://127.0.0.1:8788 node test/m1-smoke.mjs
+
+          # The inverse: a configured password with NO override must turn an
+          # anonymous request away. If this stops holding, DEMO_GATE has stopped
+          # failing closed and the demo's spend deterrent is decoration.
+          echo '--- pass 3: password set, no override — the gate closes ---'
+          boot 8789 <<EOF
+          DEMO_PASSWORD=hunter2-not-a-real-password
+          EOF
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+            -X POST http://127.0.0.1:8789/auth/challenge || true)
+          [ "$code" = 401 ] || { echo "::error::expected 401, got $code"; exit 1; }
+          echo "gate closed as expected: 401"
+
+      - name: Wrangler logs on failure
+        if: failure()
+        run: cat "$RUNNER_TEMP"/wrangler-*.log || true
+
   workflows:
     name: Workflow lint
     runs-on: ubuntu-latest
