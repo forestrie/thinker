@@ -319,7 +319,7 @@ jobs:
             --var ATTESTATION_MODE:'${{ vars.ATTESTATION_MODE }}' \
             --var MODEL_ID:'${{ vars.MODEL_ID }}' \
             --var DEMO_DAILY_TURN_CAP:'${{ vars.DEMO_DAILY_TURN_CAP }}' \
-            --var DEMO_USER_DAILY_TURN_CAP:'${{ vars.DEMO_USER_DAILY_TURN_CAP }}' \
+            --var DEMO_USER_DAILY_TURN_CAP:'${{ vars.DEMO_USER_DAILY_TURN_CAP }}'
           echo "deployed: https://thinker-${{ inputs.environment }}.${{ vars.WORKERS_DEV_ZONE }}"
 
   # -------------------------------------------------------------------- smoke
