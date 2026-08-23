@@ -64,15 +64,22 @@ export {
 } from './forestrie/delegate.ts';
 export {
 	buildUserEnvelope,
+	buildUserEnvelopeEs256,
 	verifyUserEnvelope,
+	verifyUserEnvelopeEs256,
 	verifyAttestedInput,
+	verifyAttestedInputEs256,
+	userEnvelopeAlg,
 	inputCommitment,
 	EnvelopeError,
 	COSE_ALG_KS256,
+	COSE_ALG_ES256,
 	INPUT_COMMITMENT_DOMAIN,
 	MAX_INPUT_BYTES,
 	type EnvelopeClaims,
-	type VerifiedEnvelope
+	type Es256EnvelopeSigner,
+	type VerifiedEnvelope,
+	type VerifiedEnvelopeEs256
 } from './forestrie/envelope.ts';
 export {
 	buildWorkStatementPayload,

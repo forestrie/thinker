@@ -5,7 +5,7 @@ import {
 	type ParentPolicyResult,
 	type WorkVerifyResult
 } from '@forestrie/think-scribe/forestrie/receipt';
-import { delegateSealingKs256 } from '@forestrie/think-scribe/forestrie/delegate';
+import { delegateSealing } from '@forestrie/think-scribe/forestrie/delegate';
 import {
 	confirmUserSealingDelegated,
 	fetchIdentity,
@@ -19,6 +19,7 @@ import {
 } from './scribe-api.ts';
 import type { ScribeSession } from './session.svelte.ts';
 import type { DemoWallet } from './wallet.svelte.ts';
+import type { UserRootKey } from './user-root.ts';
 import type { TurnVault } from './vault.svelte.ts';
 import { hexToBytes } from './utils.ts';
 
@@ -41,11 +42,12 @@ function inFlight(work: WorkExportWire): boolean {
  * in the browser via the receipt.ts primitives, and the user-side sealing
  * delegation for their own log. The trust roots are pinned OUT of the
  * export being audited: the agent key from `GET /identity` at session
- * start, the user's wallet address from the wallet itself.
+ * start, the user's root key from the browser's own custody (Phase 4a).
  */
 export class ProofPanel {
 	#session: ScribeSession;
 	#wallet: DemoWallet;
+	#userRoot: UserRootKey;
 	#vault: TurnVault;
 	#pollTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -69,9 +71,10 @@ export class ProofPanel {
 	policy = $state<'idle' | 'verifying' | 'done' | 'error'>('idle');
 	policyResult = $state<ParentPolicyResult | null>(null);
 
-	constructor(session: ScribeSession, wallet: DemoWallet, vault: TurnVault) {
+	constructor(session: ScribeSession, wallet: DemoWallet, userRoot: UserRootKey, vault: TurnVault) {
 		this.#session = session;
 		this.#wallet = wallet;
+		this.#userRoot = userRoot;
 		this.#vault = vault;
 	}
 
@@ -292,10 +295,13 @@ export class ProofPanel {
 			const result = await verifyWorkReceipt(
 				// The locally-kept opening rides along when we have it, so the
 				// check list gains `input-binding`: this text, and no other, is
-				// what the wallet signed a commitment to (D1/D4).
+				// what the user's root key signed a commitment to (D1/D4).
 				{ ...work, input: this.#vault.input(work.workId) ?? undefined },
 				hexToBytes(this.identity.publicKeyXY),
-				this.#wallet.addressBytes()
+				// User-leaf trust anchor = the browser's OWN root key (Phase 4a),
+				// not the export's claim of it — the same out-of-band provenance
+				// rule as the agent key.
+				await this.#userRoot.publicKeyXY()
 			);
 			this.verifications[work.workId] = { ...result, at: Date.now() };
 		} catch (err) {
@@ -373,9 +379,11 @@ export class ProofPanel {
 
 	/**
 	 * The user's half of T9: authorize the lane's vouched sealer for the
-	 * USER's log, signed by the wallet in the browser — the DO never sees
-	 * the key. Until this runs once per user log, user leaves sequence but
-	 * never seal (receipts stay pending); agent leaves are unaffected.
+	 * USER's log, signed by the browser-held root key (Phase 4a — the shipped
+	 * ES256 `delegateSealing` path, same as the agent's own log) — the DO
+	 * never sees the key. Until this runs once per user log, user leaves
+	 * sequence but never seal (receipts stay pending); agent leaves are
+	 * unaffected.
 	 */
 	async delegateUserSealing(): Promise<void> {
 		const coordinatorUrl = env.PUBLIC_DELEGATION_COORDINATOR_URL ?? '/coordinator';
@@ -398,11 +406,11 @@ export class ProofPanel {
 			return;
 		}
 		try {
-			const result = await delegateSealingKs256(
-				this.#wallet.privateKeyHex(),
-				this.#wallet.addressBytes(),
-				{ coordinatorUrl, logId: userLogId, knownSealerKeyB64 }
-			);
+			const result = await delegateSealing(await this.#userRoot.asKeyProvider(), {
+				coordinatorUrl,
+				logId: userLogId,
+				knownSealerKeyB64
+			});
 			this.delegation = 'done';
 			// Formatted immediately into a string — the Date never outlives this
 			// expression, so there is nothing for a SvelteDate to make reactive.

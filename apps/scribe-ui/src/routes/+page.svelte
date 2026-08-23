@@ -1,6 +1,8 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { DemoWallet } from '$lib/wallet.svelte.ts';
+	import { UserRootKey } from '$lib/user-root.ts';
+	import { postUserRoot } from '$lib/scribe-api.ts';
 	import { ScribeSession } from '$lib/session.svelte.ts';
 	import { ScribeChat } from '$lib/chat.svelte.ts';
 	import { ProofPanel as ProofPanelState } from '$lib/proofs.svelte.ts';
@@ -16,11 +18,14 @@
 
 	const wallet = new DemoWallet();
 	const session = new ScribeSession(wallet);
+	// The user's log root (Phase 4a): a non-extractable WebCrypto P-256 key —
+	// the wallet keeps only session auth and x402 payment (Q2 custody split).
+	const userRoot = new UserRootKey();
 	// The user's own copy of their prompts (D4). Keyed to the wallet: a reset
 	// identity starts with an empty vault, as it should.
 	const vault = new TurnVault(wallet.address);
-	const chat = new ScribeChat(session, wallet, vault);
-	const proofs = new ProofPanelState(session, wallet, vault);
+	const chat = new ScribeChat(session, userRoot, vault);
+	const proofs = new ProofPanelState(session, wallet, userRoot, vault);
 
 	// A settled turn means new commitments are in flight — pull the export.
 	chat.onTurnSettled = () => void proofs.refresh();
@@ -59,6 +64,10 @@
 		void (async () => {
 			try {
 				await session.ensure();
+				// Register the root FIRST — it is the instance's first touch, so
+				// the DO pins it before grant-at-bind issues grant_user over it
+				// (a 409 here means this browser lost the pinned root: reset).
+				await postUserRoot(session.sub!, session.token!, await userRoot.publicKeyXYHex());
 				await chat.connect();
 				await proofs.refresh();
 			} catch {
@@ -75,9 +84,14 @@
 	});
 
 	function resetIdentity() {
-		wallet.reset();
-		session.clear();
-		location.reload();
+		void (async () => {
+			// Root first: a fresh wallet means a fresh DO instance, and the new
+			// instance must pin the NEW root, not resurface the old pair.
+			await userRoot.reset();
+			wallet.reset();
+			session.clear();
+			location.reload();
+		})();
 	}
 </script>
 

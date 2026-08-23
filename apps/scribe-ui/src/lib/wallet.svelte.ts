@@ -96,10 +96,11 @@ function transferWithAuthorizationDigest(args: {
  * The demo wallet (plan §4): a browser-resident secp256k1 key standing in
  * for the user's real wallet, persisted in localStorage so the same user
  * (and so the same DO instance, `user-<address>`) returns across reloads.
- * It signs everything the wcc-1 choreography needs — the session challenge
- * (EIP-191), the per-turn input envelope (KS256 COSE), and the sealing
- * delegation for the user's own log — all client-side; neither the worker
- * nor the DO ever sees the key.
+ * Since plan-2608-13 Phase 4a its remit is the Q2 custody split: wcc-1
+ * session auth (EIP-191 challenge) and x402 payment (EIP-3009 needs
+ * secp256k1 regardless). The user LOG — envelope signing and the sealing
+ * delegation — is rooted in the WebCrypto P-256 `UserRootKey` instead; the
+ * wallet key signs client-side and never leaves this module.
  */
 export class DemoWallet {
 	#priv: Uint8Array;
@@ -147,21 +148,6 @@ export class DemoWallet {
 		sig.set(recovered.slice(1), 0);
 		sig[64] = recovered[0]! + 27;
 		return `0x${bytesToHex(sig)}`;
-	}
-
-	/**
-	 * Raw keccak-digest signature → 65-byte r‖s‖recovery (recovery raw 0/1,
-	 * NOT +27) — the canopy KS256 COSE signature layout.
-	 */
-	signDigestKs256(digest: Uint8Array): Uint8Array {
-		const recovered = secp256k1.sign(digest, this.#priv, {
-			format: 'recovered',
-			prehash: false
-		});
-		const sig = new Uint8Array(65);
-		sig.set(recovered.slice(1), 0);
-		sig[64] = recovered[0]!;
-		return sig;
 	}
 
 	/**
@@ -234,14 +220,5 @@ export class DemoWallet {
 			}
 		};
 		return btoa(JSON.stringify(payload));
-	}
-
-	/**
-	 * The raw key hex — needed ONLY by delegateSealingKs256 (the published
-	 * delegation-cose builders take the key, not a signer callback). Scoped
-	 * to that call; nothing else reads it.
-	 */
-	privateKeyHex(): string {
-		return bytesToHex(this.#priv);
 	}
 }

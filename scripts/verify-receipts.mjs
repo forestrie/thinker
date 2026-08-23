@@ -2,9 +2,9 @@
 // T8). Pulls the Scribe's receipt export (or reads a saved one) and verifies
 // every receipted work unit with the log absent:
 //
-//   user-envelope       the user's KS256 signature over their input
-//                       COMMITMENT, and its binding to the instance's wcc-1
-//                       principal
+//   user-envelope       the user's signature over their input COMMITMENT —
+//                       ES256 under the export's browser root key (Phase 4a)
+//                       or legacy KS256 recovered against the wcc-1 principal
 //   statement-signature the agent's ES256 COSE Sign1 over the work statement
 //   receipt             inclusion proof + sealed checkpoint + delegation cert
 //                       under the known log key (@forestrie/receipt-verify)
@@ -36,7 +36,12 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { verifyWorkReceipt } from '../packages/think-scribe/src/forestrie/receipt.ts';
-import { verifyUserEnvelope } from '../packages/think-scribe/src/forestrie/envelope.ts';
+import {
+	COSE_ALG_ES256,
+	userEnvelopeAlg,
+	verifyUserEnvelope,
+	verifyUserEnvelopeEs256
+} from '../packages/think-scribe/src/forestrie/envelope.ts';
 
 function die(msg) {
 	console.error(`verify-receipts: ${msg}`);
@@ -113,32 +118,50 @@ for (const work of works) {
 	}
 	receipted++;
 
-	const checks = [];
-	try {
-		const envelope = Uint8Array.from(Buffer.from(work.envelopeB64, 'base64'));
-		const verified = await verifyUserEnvelope(envelope);
-		const bound =
-			typeof exported.principal !== 'string' ||
-			verified.address.toLowerCase() === exported.principal.toLowerCase();
-		checks.push({
-			name: 'user-envelope',
-			ok: bound,
-			detail: bound
-				? `signed by ${verified.address}`
-				: `signer ${verified.address} is not the bound principal`
-		});
-	} catch (err) {
-		checks.push({ name: 'user-envelope', ok: false, detail: String(err) });
-	}
-
-	// User-leaf trust root = the bound principal's wallet address (the same
-	// enrolment-time provenance as the agent key) — not the envelope's own
-	// claim of its signer, which would be self-referential.
+	// User trust root, by custody shape (plan-2608-13 Phase 4a): the export's
+	// 64-byte browser root key when present, else the bound principal's wallet
+	// address (KS256 legacy) — the same enrolment-time provenance caveat as
+	// the agent key applies to both.
+	const userRootXY =
+		typeof exported.forestrie?.userRootPublicKeyXY === 'string' &&
+		/^[0-9a-f]{128}$/i.test(exported.forestrie.userRootPublicKeyXY)
+			? Uint8Array.from(Buffer.from(exported.forestrie.userRootPublicKeyXY, 'hex'))
+			: null;
 	const principalAddress =
 		typeof exported.principal === 'string' && /^0x[0-9a-f]{40}$/i.test(exported.principal)
 			? Uint8Array.from(Buffer.from(exported.principal.slice(2), 'hex'))
 			: null;
-	const result = await verifyWorkReceipt(work, trustKey, principalAddress);
+
+	const checks = [];
+	try {
+		const envelope = Uint8Array.from(Buffer.from(work.envelopeB64, 'base64'));
+		if (userEnvelopeAlg(envelope) === COSE_ALG_ES256) {
+			// ES256 shape: no signer recovery — verify under the exported root.
+			if (!userRootXY) throw new Error('ES256 envelope but the export carries no user root key');
+			const verified = await verifyUserEnvelopeEs256(envelope, userRootXY);
+			checks.push({
+				name: 'user-envelope',
+				ok: true,
+				detail: `signed by user root x ${verified.kidHex.slice(0, 16)}…`
+			});
+		} else {
+			const verified = await verifyUserEnvelope(envelope);
+			const bound =
+				typeof exported.principal !== 'string' ||
+				verified.address.toLowerCase() === exported.principal.toLowerCase();
+			checks.push({
+				name: 'user-envelope',
+				ok: bound,
+				detail: bound
+					? `signed by ${verified.address}`
+					: `signer ${verified.address} is not the bound principal`
+			});
+		}
+	} catch (err) {
+		checks.push({ name: 'user-envelope', ok: false, detail: String(err) });
+	}
+
+	const result = await verifyWorkReceipt(work, trustKey, userRootXY ?? principalAddress);
 	checks.push(...result.checks);
 
 	const ok = checks.every((c) => c.ok);

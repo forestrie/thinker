@@ -111,6 +111,8 @@ export interface ReceiptsExport {
 	forestrie: {
 		agentLogId: string | null;
 		userLogId: string | null;
+		/** The pinned browser root (hex 64-byte x‖y) — user-leaf trust anchor (4a). */
+		userRootPublicKeyXY?: string | null;
 		userSealingDelegated?: boolean;
 		/** Pending x402 challenge (W4b) to sign for the user grant; else null. */
 		userGrantChallenge?: string | null;
@@ -197,7 +199,25 @@ export async function kickReceiptCollection(sub: string, token: string): Promise
 	);
 }
 
-/** Tell the DO the wallet authorized sealing — releases held user leaves. */
+/**
+ * Register (or re-assert) the browser-held user root key with the DO (Phase
+ * 4a): the first key posted is pinned TOFU under the wcc-1 session and
+ * becomes the user log's grantData; the same key is idempotent; a different
+ * key is refused with 409 (reset identity to re-root). Called right after
+ * session establishment, BEFORE any turn, so grant-at-bind issues the grant
+ * over the root.
+ */
+export async function postUserRoot(sub: string, token: string, publicKeyXY: string): Promise<void> {
+	await expectJson(
+		await fetch(`${agentPath(sub)}/user-root`, {
+			method: 'POST',
+			headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+			body: JSON.stringify({ publicKeyXY })
+		})
+	);
+}
+
+/** Tell the DO the user's root key authorized sealing — releases held user leaves. */
 export async function confirmUserSealingDelegated(sub: string, token: string): Promise<void> {
 	await expectJson(
 		await fetch(`${agentPath(sub)}/user-sealing-delegated`, {

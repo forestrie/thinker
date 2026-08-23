@@ -2,7 +2,7 @@ import { AgentClient } from 'agents/client';
 import { buildUserEnvelope, newTurnClaims, workIdOf } from './envelope.ts';
 import { postTurn, scribeBase, ScribeApiError } from './scribe-api.ts';
 import type { ScribeSession } from './session.svelte.ts';
-import type { DemoWallet } from './wallet.svelte.ts';
+import type { UserRootKey } from './user-root.ts';
 import type { TurnVault } from './vault.svelte.ts';
 import { bytesToB64 } from './utils.ts';
 
@@ -100,14 +100,15 @@ function projectServerMessage(message: ServerUIMessage): ChatMessage {
  * AgentClient (plan §5.1) — re-implements the slice of `useAgentChat` the
  * Scribe needs. One deliberate divergence from the starter: turns are NEVER
  * sent as `cf_agent_use_chat_request`. The user's input enters via
- * HTTP POST /turn as a signed KS256 envelope (M3 attested admission); the
+ * HTTP POST /turn as an envelope signed by the user's P-256 root key (M3
+ * attested admission, ES256 shape since Phase 4a); the
  * WebSocket is read-mostly — transcript sync on connect, live stream
  * broadcast while the server-admitted turn runs, and the resume handshake
  * (`STREAM_RESUMING` → ACK) for streams that started before we connected.
  */
 export class ScribeChat {
 	#session: ScribeSession;
-	#wallet: DemoWallet;
+	#userRoot: UserRootKey;
 	#vault: TurnVault;
 	#client: AgentClient | null = null;
 	/**
@@ -132,9 +133,9 @@ export class ScribeChat {
 	/** Fires after a turn completes — the proof panel refreshes on it. */
 	onTurnSettled: (() => void) | null = null;
 
-	constructor(session: ScribeSession, wallet: DemoWallet, vault: TurnVault) {
+	constructor(session: ScribeSession, userRoot: UserRootKey, vault: TurnVault) {
 		this.#session = session;
-		this.#wallet = wallet;
+		this.#userRoot = userRoot;
 		this.#vault = vault;
 	}
 
@@ -375,7 +376,7 @@ export class ScribeChat {
 		this.awaiting = true;
 
 		const claims = newTurnClaims(input, this.sessionId);
-		const envelope = buildUserEnvelope(claims, this.#wallet);
+		const envelope = await buildUserEnvelope(claims, this.#userRoot);
 		const workId = await workIdOf(envelope);
 		const envelopeB64 = bytesToB64(envelope);
 		this.#vault.keep({ workId, input, envelopeB64, at: Date.now() });

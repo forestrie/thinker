@@ -40,6 +40,12 @@ import {
 } from '@forestrie/encoding';
 import type { KeyProvider } from '../keys/provider.ts';
 
+// Re-exported so browser callers building a KeyProvider adapter for
+// delegateSealing (scribe-ui's UserRootKey) can take the type from this
+// subpath without importing the package index, which drags the whole DO
+// (and its workers-types ambience) into their typecheck graph.
+export type { KeyProvider } from '../keys/provider.ts';
+
 /** Horizon lease default: effectively unbounded (matches the CLI). */
 const DEFAULT_HORIZON_MMR_END = Number.MAX_SAFE_INTEGER;
 
