@@ -67,6 +67,7 @@ import {
 	workIndexKey
 } from './retention.ts';
 import { isPermittedClientFrame } from './ws-frames.ts';
+import { verifySessionKeyEndorsement } from '@forestrie/receipt-verify';
 
 /**
  * Bindings the Scribe needs from its hosting Worker. The app's generated
@@ -132,6 +133,13 @@ export interface ScribeEnv extends Cloudflare.Env {
 	 */
 	GRANT_AUTHORITY_URL?: string;
 	GRANT_AUTHORITY_TOKEN?: string;
+	/**
+	 * UV policy for the passkey onboarding endorsement (ADR-0064 §3): the
+	 * endorsement precedes the grant, so `GF_REQUIRES_USER_VERIFICATION`
+	 * cannot govern it — this is deployment config. Default REQUIRED; set
+	 * "false" to accept a user-presence-only endorsement gesture.
+	 */
+	USER_ROOT_REQUIRE_UV?: string;
 	/**
 	 * O4 user-attestation shape: "embed" (default — the envelope rides inside
 	 * the agent's leaf only) or "separate" (M5 flip — the envelope is ALSO
@@ -199,6 +207,19 @@ const USER_LOG_ID_KEY = 'forestrie:userLogId';
  * is refused (reset identity to re-root).
  */
 const USER_ROOT_XY_KEY = 'forestrie:userRootXY';
+/**
+ * Passkey custody (plan-2608-13 Phase 4.1, ADR-0064): when the pinned root
+ * is a passkey, the per-turn envelope signer is a separate SESSION key —
+ * the 4a WebCrypto pair, demoted — endorsed once by the root. Both stored
+ * together: the session key (hex 64-byte x‖y) that leaves are admitted
+ * against, and the endorsement COSE Sign1 (base64) that `/receipts`
+ * exports so offline verifiers can chain root → endorsement → leaves.
+ * Present ⇒ passkey custody; a later bare (endorsement-free) post is a
+ * custody DOWNGRADE and is refused fail-closed. The session key rotates
+ * under the same root with a fresh valid endorsement.
+ */
+const USER_SESSION_XY_KEY = 'forestrie:userSessionXY';
+const USER_ROOT_ENDORSEMENT_KEY = 'forestrie:userRootEndorsementB64';
 /**
  * A pending x402 `X-PAYMENT-REQUIRED` challenge (base64) for the user grant
  * (plan-2608-09 W4b): stored when the authority proxies canopy's 402, exposed
@@ -775,12 +796,17 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 		// session-authenticated user pinned via POST /user-root.
 		let verified: { workId: string; input: string };
 		if (userEnvelopeAlg(envelope) === COSE_ALG_ES256) {
-			const rootXYHex = await this.ctx.storage.get<string>(USER_ROOT_XY_KEY);
-			if (!rootXYHex)
+			// Under passkey custody (4.1) the leaf signer is the endorsed
+			// SESSION key, not the root; under 4a they are the same key. The
+			// envelope profile is identical either way (kid = signer x).
+			const leafXYHex =
+				(await this.ctx.storage.get<string>(USER_SESSION_XY_KEY)) ??
+				(await this.ctx.storage.get<string>(USER_ROOT_XY_KEY));
+			if (!leafXYHex)
 				throw new EnvelopeError(
 					'no user root key on record for this instance — register it via POST /user-root first'
 				);
-			verified = await verifyAttestedInputEs256(envelope, input, hexToBytes(rootXYHex));
+			verified = await verifyAttestedInputEs256(envelope, input, hexToBytes(leafXYHex));
 		} else {
 			const ks256 = await verifyAttestedInput(envelope, input);
 			if (ks256.address.toLowerCase() !== principal.toLowerCase())
@@ -1630,10 +1656,16 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 				forestrie: {
 					agentLogId: (await this.ctx.storage.get<string>(AGENT_LOG_ID_KEY)) ?? null,
 					userLogId: (await this.ctx.storage.get<string>(USER_LOG_ID_KEY)) ?? null,
-					// Phase 4a: the pinned browser root (hex x‖y) — the user-leaf
-					// trust anchor an offline verifier needs (the KS256 shape's
-					// anchor was the principal address, which travels anyway).
+					// Phase 4a: the pinned root (hex x‖y) — the trust anchor an
+					// offline verifier needs (the KS256 shape's anchor was the
+					// principal address, which travels anyway). Under passkey
+					// custody (4.1) this names the PASSKEY, and the session key +
+					// endorsement below complete the offline chain
+					// root → endorsement → leaves (ADR-0064 §4).
 					userRootPublicKeyXY: (await this.ctx.storage.get<string>(USER_ROOT_XY_KEY)) ?? null,
+					userSessionPublicKeyXY: (await this.ctx.storage.get<string>(USER_SESSION_XY_KEY)) ?? null,
+					userRootEndorsementB64:
+						(await this.ctx.storage.get<string>(USER_ROOT_ENDORSEMENT_KEY)) ?? null,
 					userSealingDelegated:
 						(await this.ctx.storage.get<number>(USER_SEALING_DELEGATED_KEY)) !== undefined,
 					// Polled every refresh (identity is pinned at first fetch): the
@@ -1656,17 +1688,42 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 			return Response.json({ principal, scheduled: true });
 		}
 
-		// Phase 4a: the browser registers its user-log root — a non-extractable
-		// WebCrypto P-256 key it holds — under the wcc-1 session. TOFU: the
-		// first key pinned is the root for this instance's lifetime; a
-		// different key later is refused (reset identity to re-root). With a
-		// root pinned, grant_user is issued over it (64-byte ES256 grantData)
-		// and ES256 envelopes are admitted against it.
+		// Phase 4a: the browser registers its user-log root under the wcc-1
+		// session. TOFU: the first key pinned is the root for this instance's
+		// lifetime; a different key later is refused (reset identity to
+		// re-root). With a root pinned, grant_user is issued over it (64-byte
+		// ES256 grantData).
+		//
+		// Phase 4.1 (ADR-0064): passkey custody adds `sessionPublicKeyXY` +
+		// `endorsementB64` (both-or-neither, mirroring the coordinator's
+		// assertion intake): the root is the PASSKEY, and per-turn envelopes
+		// are admitted against the endorsed session key instead. The
+		// endorsement verifies under the posted root via the shared -65800
+		// branch before anything pins; UV per USER_ROOT_REQUIRE_UV (deployment
+		// config — the endorsement precedes the grant, ADR-0064 §3). Session
+		// keys rotate under the same root with a fresh endorsement; a bare
+		// post after passkey custody is a downgrade and is refused.
 		if (request.method === 'POST' && url.pathname.endsWith('/user-root')) {
-			const body = (await request.json()) as { publicKeyXY?: string };
+			const body = (await request.json()) as {
+				publicKeyXY?: string;
+				sessionPublicKeyXY?: string;
+				endorsementB64?: string;
+			};
 			const xyHex = String(body.publicKeyXY ?? '').toLowerCase();
 			if (!/^[0-9a-f]{128}$/.test(xyHex))
 				return new Response('publicKeyXY must be 128 hex chars (64-byte P-256 x||y)', {
+					status: 400
+				});
+			const sessionHex = String(body.sessionPublicKeyXY ?? '').toLowerCase();
+			const endorsementB64 = String(body.endorsementB64 ?? '');
+			if ((sessionHex === '') !== (endorsementB64 === ''))
+				return new Response(
+					'sessionPublicKeyXY and endorsementB64 must be supplied together or not at all',
+					{ status: 400 }
+				);
+			const endorsed = sessionHex !== '';
+			if (endorsed && !/^[0-9a-f]{128}$/.test(sessionHex))
+				return new Response('sessionPublicKeyXY must be 128 hex chars (64-byte P-256 x||y)', {
 					status: 400
 				});
 			const pinned = await this.ctx.storage.get<string>(USER_ROOT_XY_KEY);
@@ -1675,6 +1732,39 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 					'a different user root key is already pinned to this instance — reset your identity to re-root',
 					{ status: 409 }
 				);
+			const pinnedSession = await this.ctx.storage.get<string>(USER_SESSION_XY_KEY);
+			if (!endorsed && pinnedSession !== undefined)
+				return new Response(
+					'this instance is under passkey custody — a session-root post would be a custody downgrade (reset your identity to re-root)',
+					{ status: 409 }
+				);
+			if (endorsed) {
+				let endorsement: Uint8Array;
+				try {
+					endorsement = decodeBase64(endorsementB64);
+				} catch {
+					return new Response('endorsementB64 is not valid base64', { status: 400 });
+				}
+				const rootXY = hexToBytes(xyHex);
+				const result = await verifySessionKeyEndorsement(
+					endorsement,
+					{ x: rootXY.slice(0, 32), y: rootXY.slice(32, 64), curve: 'P-256' },
+					{ requireUserVerification: this.env.USER_ROOT_REQUIRE_UV !== 'false' }
+				);
+				if (!result.ok)
+					return new Response(`session-key endorsement did not verify: ${result.reason}`, {
+						status: 400
+					});
+				// The signed payload is authoritative; the posted hex must agree.
+				if (bytesToHex(result.sessionPublicKeyXY) !== sessionHex)
+					return new Response('sessionPublicKeyXY does not match the key the endorsement signs', {
+						status: 400
+					});
+				// Pin-or-rotate: a fresh valid endorsement under the pinned root
+				// re-pins the session key (rotation = one gesture, ADR-0064 §3).
+				await this.ctx.storage.put(USER_SESSION_XY_KEY, sessionHex);
+				await this.ctx.storage.put(USER_ROOT_ENDORSEMENT_KEY, endorsementB64);
+			}
 			if (pinned === undefined) {
 				await this.ctx.storage.put(USER_ROOT_XY_KEY, xyHex);
 				// The root arriving can unblock grant_user: when this request is
@@ -1691,7 +1781,12 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 				)
 					await this.schedule(0, 'acquireUserGrant', {});
 			}
-			return Response.json({ principal, publicKeyXY: xyHex, pinned: pinned === undefined });
+			return Response.json({
+				principal,
+				publicKeyXY: xyHex,
+				pinned: pinned === undefined,
+				...(endorsed ? { sessionPublicKeyXY: sessionHex, endorsed: true } : {})
+			});
 		}
 
 		// The client confirms it signed a sealing delegation for the user's log

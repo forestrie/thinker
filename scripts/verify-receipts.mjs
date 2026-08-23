@@ -35,7 +35,10 @@
 // Node >= 22.18 (imports the repo's TypeScript sources via type stripping).
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { verifyWorkReceipt } from '../packages/think-scribe/src/forestrie/receipt.ts';
+import {
+	resolveEndorsedSessionKey,
+	verifyWorkReceipt
+} from '../packages/think-scribe/src/forestrie/receipt.ts';
 import {
 	COSE_ALG_ES256,
 	userEnvelopeAlg,
@@ -133,16 +136,42 @@ for (const work of works) {
 			: null;
 
 	const checks = [];
+
+	// Passkey custody (Phase 4.1, ADR-0064): the exported root is the
+	// passkey, and per-turn envelopes are signed by the SESSION key the
+	// exported endorsement names. Walk the rung: verify the endorsement under
+	// the root, then verify envelopes under the endorsed key. A broken
+	// endorsement fails the chain — never a silent fall-back to the root.
+	let userEnvelopeXY = userRootXY;
+	const endorsementB64 =
+		typeof exported.forestrie?.userRootEndorsementB64 === 'string'
+			? exported.forestrie.userRootEndorsementB64
+			: null;
+	if (userRootXY && endorsementB64) {
+		try {
+			userEnvelopeXY = await resolveEndorsedSessionKey(userRootXY, endorsementB64);
+			checks.push({
+				name: 'session-endorsement',
+				ok: true,
+				detail: `passkey root endorses session key x ${Buffer.from(userEnvelopeXY.slice(0, 8)).toString('hex')}…`
+			});
+		} catch (err) {
+			checks.push({ name: 'session-endorsement', ok: false, detail: String(err) });
+			userEnvelopeXY = null;
+		}
+	}
 	try {
 		const envelope = Uint8Array.from(Buffer.from(work.envelopeB64, 'base64'));
 		if (userEnvelopeAlg(envelope) === COSE_ALG_ES256) {
-			// ES256 shape: no signer recovery — verify under the exported root.
-			if (!userRootXY) throw new Error('ES256 envelope but the export carries no user root key');
-			const verified = await verifyUserEnvelopeEs256(envelope, userRootXY);
+			// ES256 shape: no signer recovery — verify under the exported key
+			// (the endorsed session key under passkey custody, else the root).
+			if (!userEnvelopeXY)
+				throw new Error('ES256 envelope but the export carries no verifiable user key');
+			const verified = await verifyUserEnvelopeEs256(envelope, userEnvelopeXY);
 			checks.push({
 				name: 'user-envelope',
 				ok: true,
-				detail: `signed by user root x ${verified.kidHex.slice(0, 16)}…`
+				detail: `signed by user key x ${verified.kidHex.slice(0, 16)}…`
 			});
 		} else {
 			const verified = await verifyUserEnvelope(envelope);
@@ -161,7 +190,12 @@ for (const work of works) {
 		checks.push({ name: 'user-envelope', ok: false, detail: String(err) });
 	}
 
-	const result = await verifyWorkReceipt(work, trustKey, userRootXY ?? principalAddress);
+	const result = await verifyWorkReceipt(
+		work,
+		trustKey,
+		userRootXY ?? principalAddress,
+		userEnvelopeXY
+	);
 	checks.push(...result.checks);
 
 	const ok = checks.every((c) => c.ok);

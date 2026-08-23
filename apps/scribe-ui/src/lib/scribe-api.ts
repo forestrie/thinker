@@ -111,8 +111,16 @@ export interface ReceiptsExport {
 	forestrie: {
 		agentLogId: string | null;
 		userLogId: string | null;
-		/** The pinned browser root (hex 64-byte x‖y) — user-leaf trust anchor (4a). */
+		/**
+		 * The pinned root (hex 64-byte x‖y) — user-leaf trust anchor (4a).
+		 * Under passkey custody (4.1) this names the PASSKEY, and the session
+		 * key + endorsement below complete the offline chain (ADR-0064).
+		 */
 		userRootPublicKeyXY?: string | null;
+		/** Endorsed per-turn session key (hex 64-byte x‖y); null before 4.1. */
+		userSessionPublicKeyXY?: string | null;
+		/** The passkey's session-key endorsement (base64 COSE Sign1). */
+		userRootEndorsementB64?: string | null;
 		userSealingDelegated?: boolean;
 		/** Pending x402 challenge (W4b) to sign for the user grant; else null. */
 		userGrantChallenge?: string | null;
@@ -207,12 +215,22 @@ export async function kickReceiptCollection(sub: string, token: string): Promise
  * session establishment, BEFORE any turn, so grant-at-bind issues the grant
  * over the root.
  */
-export async function postUserRoot(sub: string, token: string, publicKeyXY: string): Promise<void> {
+export async function postUserRoot(
+	sub: string,
+	token: string,
+	publicKeyXY: string,
+	/**
+	 * Passkey custody (4.1, ADR-0064): the endorsed session key + the
+	 * passkey's endorsement over it, posted together. `publicKeyXY` then
+	 * names the PASSKEY root; leaves are admitted against the session key.
+	 */
+	endorsed?: { sessionPublicKeyXY: string; endorsementB64: string }
+): Promise<void> {
 	await expectJson(
 		await fetch(`${agentPath(sub)}/user-root`, {
 			method: 'POST',
 			headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-			body: JSON.stringify({ publicKeyXY })
+			body: JSON.stringify({ publicKeyXY, ...(endorsed ?? {}) })
 		})
 	);
 }
