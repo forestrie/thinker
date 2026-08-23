@@ -90,9 +90,10 @@
 		<Card title="Activate your log">
 			<div class="space-y-2 p-4 text-xs">
 				<p class="text-kumo-subtle">
-					Your signed inputs land as their own leaves on a log <em>owned by your wallet</em>. Only
-					your key can authorize the lane's sealer to checkpoint it — done here, in the browser; the
-					agent never holds your key. Until then your leaves are held, unregistered.
+					Your signed inputs land as their own leaves on a log <em
+						>owned by a key only this browser holds</em
+					>. Only that key can authorize the lane's sealer to checkpoint it — done here, in the
+					browser; the agent never holds your key. Until then your leaves are held, unregistered.
 				</p>
 				<div class="flex items-center gap-2">
 					<Button
@@ -100,7 +101,7 @@
 						variant={sealingReady && !activated ? 'primary' : 'secondary'}
 						disabled={!sealingReady || proofs.delegation === 'working'}
 						title={sealingReady
-							? 'Sign a sealing delegation for your log with your wallet'
+							? "Sign a sealing delegation for your log with your browser's root key"
 							: 'Your log is being created — a moment'}
 						onclick={() => proofs.delegateUserSealing()}
 					>

@@ -23,6 +23,13 @@ export interface IssuedGrant {
 	grantB64: string;
 	/** Present on user grants: the purchased batch ceiling (W4a). */
 	maxHeight?: number;
+	/**
+	 * User grants, ES256 shape (plan-2608-13 Phase 4a): the 64-byte P-256
+	 * root (hex x‖y) the grantData endorses. Absent = legacy grant over the
+	 * 20-byte wallet address. Cached responses are only reused when the
+	 * requested shape matches — a changed root is a NEW log.
+	 */
+	publicKeyXY?: string;
 }
 
 /**

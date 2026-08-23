@@ -37,7 +37,13 @@ import { calculateRoot, verifyInclusion, type Hasher } from '@forestrie/merklelo
 import { verifyCoseSign1WithParsedKey } from '@forestrie/encoding';
 import { cborDecode, cborEncode, type CborMap } from './cbor.ts';
 import { outputCommitment, sha256Hex } from '../attestation.ts';
-import { inputCommitment, verifyUserEnvelope } from './envelope.ts';
+import {
+	COSE_ALG_ES256,
+	inputCommitment,
+	userEnvelopeAlg,
+	verifyUserEnvelope,
+	verifyUserEnvelopeEs256
+} from './envelope.ts';
 
 const ALG = 1;
 const KID = 4;
@@ -195,8 +201,12 @@ function decodeBase64(value: string): Uint8Array {
 export async function verifyWorkReceipt(
 	work: WorkExport,
 	agentPublicKeyXY: Uint8Array,
-	/** The user's 20-byte wallet address — trust root for the user leaf (O4). */
-	userAddress20?: Uint8Array | null
+	/**
+	 * Trust root for the user leaf (O4): the 20-byte wallet address (KS256
+	 * shape) or, since Phase 4a, the 64-byte P-256 x‖y of the browser-held
+	 * root key (ES256 shape). Length selects the verification rung.
+	 */
+	userTrustRoot?: Uint8Array | null
 ): Promise<WorkVerifyResult> {
 	const checks: WorkCheck[] = [];
 	const fail = (name: string, detail: string): WorkVerifyResult => {
@@ -279,15 +289,29 @@ export async function verifyWorkReceipt(
 	// user's to disclose, which is the entire point of committing the hash.
 	if (typeof work.input === 'string' && work.envelopeB64 !== undefined) {
 		try {
-			const verified = await verifyUserEnvelope(decodeBase64(work.envelopeB64));
-			const opens =
-				inputCommitment(verified.claims.nonce, work.input) === verified.claims.inputHash;
+			const envelope = decodeBase64(work.envelopeB64);
+			let claims: { nonce: string; inputHash: string };
+			let signerDetail: string;
+			if (userEnvelopeAlg(envelope) === COSE_ALG_ES256) {
+				// ES256 shape (Phase 4a): no signer recovery — verify under the
+				// caller-trusted root key, which must therefore be present.
+				if (!userTrustRoot || userTrustRoot.length !== 64)
+					throw new ReceiptError('ES256 envelope needs the 64-byte user root key as trust anchor');
+				const verified = await verifyUserEnvelopeEs256(envelope, userTrustRoot);
+				claims = verified.claims;
+				signerDetail = `root x ${verified.kidHex.slice(0, 16)}…`;
+			} else {
+				const verified = await verifyUserEnvelope(envelope);
+				claims = verified.claims;
+				signerDetail = verified.address;
+			}
+			const opens = inputCommitment(claims.nonce, work.input) === claims.inputHash;
 			checks.push({
 				name: 'input-binding',
 				ok: opens,
 				detail: opens
-					? `H(nonce ‖ input) = ${verified.claims.inputHash.slice(0, 16)}… — signed by ${verified.address}`
-					: 'the supplied text does NOT open the commitment the wallet signed'
+					? `H(nonce ‖ input) = ${claims.inputHash.slice(0, 16)}… — signed by ${signerDetail}`
+					: 'the supplied text does NOT open the commitment the user key signed'
 			});
 		} catch (err) {
 			checks.push({ name: 'input-binding', ok: false, detail: String(err) });
@@ -308,7 +332,7 @@ export async function verifyWorkReceipt(
 			const userChecks = await verifyUserLeafReceipt(
 				work.envelopeB64,
 				work.userLeaf,
-				userAddress20 ?? null
+				userTrustRoot ?? null
 			);
 			checks.push(...userChecks.checks);
 		}
@@ -485,11 +509,17 @@ function subtleHasher(): Hasher {
  *
  * Trust root = the user's wallet address, exactly as the agent leaf's root
  * is the agent key ("known log key" rung, FOR-297).
+ *
+ * Since Phase 4a the user log may instead be rooted in a browser-held ES256
+ * key (64-byte x‖y trust root). That shape needs no special rung at all —
+ * receipt-verify's standard ES256 delegation resolution applies, exactly as
+ * for the agent leaf, with the envelope as the payload.
  */
 export async function verifyUserLeafReceipt(
 	envelopeB64: string,
 	userLeaf: UserLeafExport,
-	userAddress20: Uint8Array | null
+	/** 20-byte wallet address (KS256 rung) or 64-byte P-256 x‖y (ES256 rung). */
+	userTrustRoot: Uint8Array | null
 ): Promise<WorkVerifyResult> {
 	const checks: WorkCheck[] = [];
 	const fail = (name: string, detail: string): WorkVerifyResult => {
@@ -505,9 +535,37 @@ export async function verifyUserLeafReceipt(
 		});
 		return { ok: true, checks };
 	}
-	if (!userAddress20 || userAddress20.length !== 20)
-		return fail('user-leaf', 'no user wallet address to anchor trust');
+	if (!userTrustRoot || (userTrustRoot.length !== 20 && userTrustRoot.length !== 64))
+		return fail(
+			'user-leaf',
+			'no user trust root to anchor: need the 20-byte wallet address or the 64-byte root key'
+		);
 
+	// ES256-rooted log (Phase 4a): the standard offline path, same as the
+	// agent leaf — inclusion + checkpoint + delegation certificate under the
+	// root key, with the envelope bytes as the leaf payload.
+	if (userTrustRoot.length === 64) {
+		try {
+			const result = await verifyReceiptOfflineWithKeys({
+				receiptCbor: decodeBase64(userLeaf.receiptB64),
+				payload: decodeBase64(envelopeB64),
+				idtimestampBe8: entryIdHexToIdtimestampBe8(userLeaf.entryId),
+				trustKeys: [await importEs256PublicKeyFromGrantDataXy64(userTrustRoot)]
+			});
+			checks.push({
+				name: 'user-leaf-receipt',
+				ok: result.ok,
+				detail: result.ok
+					? `entry ${userLeaf.entryId} under the user's root key`
+					: `${result.stage}: ${result.reason ?? 'failed'}`
+			});
+		} catch (err) {
+			checks.push({ name: 'user-leaf-receipt', ok: false, detail: String(err) });
+		}
+		return { ok: checks.every((c) => c.ok), checks };
+	}
+
+	const userAddress20 = userTrustRoot;
 	const receiptCbor = decodeBase64(userLeaf.receiptB64);
 	let parsed: ReturnType<typeof parseReceipt>;
 	try {

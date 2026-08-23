@@ -12,7 +12,12 @@
  * topology — never by an operator bypass token (canopy C7/C10).
  *
  *   POST /grants/agent {publicKeyXY}  grantData = 64-byte ES256 x‖y (agent kid)
- *   POST /grants/user  {address}      grantData = 20-byte KS256 wallet address
+ *   POST /grants/user  {address, publicKeyXY?}
+ *                                     grantData = the 64-byte ES256 browser
+ *                                     root when publicKeyXY is given (Phase
+ *                                     4a), else the 20-byte KS256 wallet
+ *                                     address (legacy); address is always the
+ *                                     subject / payment identity
  *   GET  /healthz                     liveness + the log ids it is wired to
  *
  * ## Deployment posture
@@ -201,20 +206,42 @@ async function handleUserGrant(
 		);
 	const subject = `0x${addrHex}`;
 
+	// Phase 4a (plan-2608-13): with `publicKeyXY` the grantData is the
+	// browser-held 64-byte ES256 root — the shipped path the agent grant
+	// already uses. The wallet address stays the SUBJECT (idempotence key and
+	// payment identity); only the log's root key changes shape.
+	let rootXYHex: string | undefined;
+	if (body.publicKeyXY !== undefined) {
+		rootXYHex = String(body.publicKeyXY).toLowerCase();
+		if (!/^[0-9a-f]{128}$/.test(rootXYHex))
+			return Response.json(
+				{ error: 'publicKeyXY must be 128 hex chars (64-byte ES256 x||y)' },
+				{ status: 400 }
+			);
+	}
+
 	const { userAuthority, batchTurns } = config(env);
 	const { issue, lease } = await contexts(env);
 
 	// `renew` (W4c top-up): the caller's batch is spent — issue a FRESH grant on
-	// a fresh log (O3) rather than the cached one.
+	// a fresh log (O3) rather than the cached one. A cached grant over a
+	// DIFFERENT root shape is equally unusable (its grantData cannot verify the
+	// caller's leaves), so a shape change also falls through to a fresh issue.
 	const renew = body.renew === true;
 	if (!renew) {
 		const cached = await issue.store.getIssued('user', subject);
-		if (cached) return Response.json({ ...cached, address: subject, preIssued: true });
+		if (cached && (cached.publicKeyXY ?? null) === (rootXYHex ?? null))
+			return Response.json({ ...cached, address: subject, preIssued: true });
+		if (cached)
+			console.log(
+				`grant_user cache bypass for ${subject}: cached root shape ${cached.publicKeyXY ? 'es256' : 'ks256'} != requested ${rootXYHex ? 'es256' : 'ks256'}`
+			);
 	}
 
 	await renewLeaseIfNeeded(lease, userAuthority.logId);
 
 	const address = hexToBytes(addrHex);
+	const grantData = rootXYHex ? hexToBytes(rootXYHex) : address;
 	const xPayment = typeof body.xPayment === 'string' && body.xPayment ? body.xPayment : undefined;
 
 	let issued;
@@ -224,7 +251,7 @@ async function handleUserGrant(
 			userAuthority,
 			'user',
 			subject,
-			address,
+			grantData,
 			batchTurns,
 			xPayment
 		);
@@ -242,17 +269,20 @@ async function handleUserGrant(
 		throw err;
 	}
 
-	await uploadKs256PublicRoot(env, issued.logId, address);
+	// canopy auto-forwards 64-byte ES256 owner keys to the coordinator, so
+	// only the legacy KS256 shape needs the operator public-root upload.
+	if (!rootXYHex) await uploadKs256PublicRoot(env, issued.logId, address);
 	const record = {
 		kind: 'user' as const,
 		subject,
 		logId: issued.logId,
 		grantB64: issued.grantB64,
-		maxHeight: issued.maxHeight
+		maxHeight: issued.maxHeight,
+		...(rootXYHex ? { publicKeyXY: rootXYHex } : {})
 	};
 	await issue.store.putIssued(record);
 	console.log(
-		`issued grant_user addr=${subject} log=${issued.logId}${xPayment ? ' (x402 paid)' : ''}`
+		`issued grant_user addr=${subject} root=${rootXYHex ? `es256 ${rootXYHex.slice(0, 16)}…` : 'ks256 address'} log=${issued.logId}${xPayment ? ' (x402 paid)' : ''}`
 	);
 	return Response.json({ ...record, address: subject, preIssued: false }, { status: 201 });
 }

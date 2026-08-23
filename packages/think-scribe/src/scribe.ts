@@ -31,7 +31,7 @@ interface DemoBudgetRpc {
 }
 import { DoResidentKeyProvider } from './keys/do-resident.ts';
 import { KmsSeedKeyProvider, localSeedCustodianMac } from './keys/kms-seed.ts';
-import { bytesToHex, type KeyProvider } from './keys/provider.ts';
+import { bytesToHex, hexToBytes, type KeyProvider } from './keys/provider.ts';
 import { buildSignedStatement } from './forestrie/cose.ts';
 import {
 	ConfiguredGrantProvider,
@@ -46,7 +46,13 @@ import {
 	ScrapiError
 } from './forestrie/register.ts';
 import { DelegateError, delegateSealing } from './forestrie/delegate.ts';
-import { EnvelopeError, verifyAttestedInput } from './forestrie/envelope.ts';
+import {
+	COSE_ALG_ES256,
+	EnvelopeError,
+	userEnvelopeAlg,
+	verifyAttestedInput,
+	verifyAttestedInputEs256
+} from './forestrie/envelope.ts';
 import {
 	buildWorkStatementPayload,
 	newSaltHex,
@@ -184,6 +190,15 @@ const GRANT_B64_KEY = 'forestrie:grantB64';
 const GRANT_KID_KEY = 'forestrie:grantKid';
 const USER_GRANT_B64_KEY = 'forestrie:userGrantB64';
 const USER_LOG_ID_KEY = 'forestrie:userLogId';
+/**
+ * The user's log root public key (hex 64-byte P-256 x‖y), pinned on first
+ * `POST /user-root` (plan-2608-13 Phase 4a). When present, `grant_user` is
+ * issued over this key (ES256 path) instead of the wallet address, and ES256
+ * envelopes are admitted against it. TOFU under the wcc-1 session: the
+ * session-authenticated user declares their root once; a different key later
+ * is refused (reset identity to re-root).
+ */
+const USER_ROOT_XY_KEY = 'forestrie:userRootXY';
 /**
  * A pending x402 `X-PAYMENT-REQUIRED` challenge (base64) for the user grant
  * (plan-2608-09 W4b): stored when the authority proxies canopy's 402, exposed
@@ -526,7 +541,14 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 		const principal = await this.ctx.storage.get<string>(PRINCIPAL_STORAGE_KEY);
 		if (!principal) return null;
 		const renew = (await this.ctx.storage.get<boolean>(USER_GRANT_RENEWAL_KEY)) === true;
-		const result = await authority.requestUserGrant(principal, { renew });
+		// Phase 4a: with a pinned browser root, grant_user's grantData is that
+		// 64-byte ES256 key (the shipped path — canopy auto-forwards ES256 owner
+		// keys to the coordinator); without one, the legacy wallet address.
+		const publicKeyXY = await this.ctx.storage.get<string>(USER_ROOT_XY_KEY);
+		const result = await authority.requestUserGrant(principal, {
+			renew,
+			...(publicKeyXY ? { publicKeyXY } : {})
+		});
 		if (result.kind === 'payment_required') {
 			// Park the challenge for the browser; stay embed-only until it's paid.
 			await this.ctx.storage.put(USER_GRANT_CHALLENGE_KEY, result.challengeB64);
@@ -744,12 +766,27 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 		principal: string
 	): Promise<{ workId: string; accepted: boolean; status: string }> {
 		const envelope = decodeBase64(envelopeB64);
-		// ‼️ verifyAttestedInput, never verifyUserEnvelope: this is where the
-		// signature is bound to the text the model is about to be fed. It throws
-		// before anything is spent or stored.
-		const verified = await verifyAttestedInput(envelope, input);
-		if (verified.address.toLowerCase() !== principal.toLowerCase())
-			throw new EnvelopeError('envelope signer does not match the session principal');
+		// ‼️ verifyAttestedInput / verifyAttestedInputEs256, never the bare
+		// envelope verifiers: this is where the signature is bound to the text
+		// the model is about to be fed. It throws before anything is spent or
+		// stored. Principal binding differs by custody shape: a KS256 envelope
+		// proves possession of the session wallet key (recovered address ==
+		// principal); an ES256 envelope (Phase 4a) verifies under the root the
+		// session-authenticated user pinned via POST /user-root.
+		let verified: { workId: string; input: string };
+		if (userEnvelopeAlg(envelope) === COSE_ALG_ES256) {
+			const rootXYHex = await this.ctx.storage.get<string>(USER_ROOT_XY_KEY);
+			if (!rootXYHex)
+				throw new EnvelopeError(
+					'no user root key on record for this instance — register it via POST /user-root first'
+				);
+			verified = await verifyAttestedInputEs256(envelope, input, hexToBytes(rootXYHex));
+		} else {
+			const ks256 = await verifyAttestedInput(envelope, input);
+			if (ks256.address.toLowerCase() !== principal.toLowerCase())
+				throw new EnvelopeError('envelope signer does not match the session principal');
+			verified = ks256;
+		}
 
 		// Resolved BEFORE the gate closes: addressing the budget DO costs an init
 		// RPC on the first call of each wake, and the input gate should be held
@@ -969,8 +1006,9 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 			}
 			if (record.state !== 'queued') continue;
 			// The user's leaf: the signed envelope registered AS-IS under
-			// grant_user — it already is a valid KS256 COSE Sign1 statement whose
-			// kid (the wallet address) matches the grant's grantData. Cross-ref to
+			// grant_user — it already is a valid COSE Sign1 statement whose kid
+			// matches the grant's grantData (KS256: the wallet address; ES256:
+			// the pinned root's x coordinate, Phase 4a). Cross-ref to
 			// the agent leaf is the stable workId = H(envelope) (no ordering
 			// dependency; sequencing is async). Until the wallet has authorized
 			// sealing for the user's log, the leaf is HELD, not registered — a
@@ -1118,7 +1156,8 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 
 			// The user leaf follows the identical status→receipt ladder on the
 			// user's log. Its sealing needs the USER's delegation (client-side,
-			// KS256) — until that lands, it simply stays "sequenced".
+			// signed by the log root) — until that lands, it simply stays
+			// "sequenced".
 			const leaf = record.userLeaf;
 			if (leaf && inFlight(leaf.state)) {
 				leaf.pollAttempts = (leaf.pollAttempts ?? 0) + 1;
@@ -1591,6 +1630,10 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 				forestrie: {
 					agentLogId: (await this.ctx.storage.get<string>(AGENT_LOG_ID_KEY)) ?? null,
 					userLogId: (await this.ctx.storage.get<string>(USER_LOG_ID_KEY)) ?? null,
+					// Phase 4a: the pinned browser root (hex x‖y) — the user-leaf
+					// trust anchor an offline verifier needs (the KS256 shape's
+					// anchor was the principal address, which travels anyway).
+					userRootPublicKeyXY: (await this.ctx.storage.get<string>(USER_ROOT_XY_KEY)) ?? null,
 					userSealingDelegated:
 						(await this.ctx.storage.get<number>(USER_SEALING_DELEGATED_KEY)) !== undefined,
 					// Polled every refresh (identity is pinned at first fetch): the
@@ -1613,11 +1656,50 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 			return Response.json({ principal, scheduled: true });
 		}
 
-		// The client confirms the wallet signed a sealing delegation for the
-		// user's log (delegateSealingKs256 ran browser-side — the DO cannot
-		// observe it, the coordinator has no read API). Held user leaves are
-		// released by the drain this schedules. Worst case for a false claim
-		// is the pre-hold behavior: leaves sequence and wait on the sealer.
+		// Phase 4a: the browser registers its user-log root — a non-extractable
+		// WebCrypto P-256 key it holds — under the wcc-1 session. TOFU: the
+		// first key pinned is the root for this instance's lifetime; a
+		// different key later is refused (reset identity to re-root). With a
+		// root pinned, grant_user is issued over it (64-byte ES256 grantData)
+		// and ES256 envelopes are admitted against it.
+		if (request.method === 'POST' && url.pathname.endsWith('/user-root')) {
+			const body = (await request.json()) as { publicKeyXY?: string };
+			const xyHex = String(body.publicKeyXY ?? '').toLowerCase();
+			if (!/^[0-9a-f]{128}$/.test(xyHex))
+				return new Response('publicKeyXY must be 128 hex chars (64-byte P-256 x||y)', {
+					status: 400
+				});
+			const pinned = await this.ctx.storage.get<string>(USER_ROOT_XY_KEY);
+			if (pinned !== undefined && pinned !== xyHex)
+				return new Response(
+					'a different user root key is already pinned to this instance — reset your identity to re-root',
+					{ status: 409 }
+				);
+			if (pinned === undefined) {
+				await this.ctx.storage.put(USER_ROOT_XY_KEY, xyHex);
+				// The root arriving can unblock grant_user: when this request is
+				// also the instance's first touch, grant-at-bind scheduled before
+				// the pin landed, and the scheduled task now sees the root.
+				// Re-kick only while no grant exists, so a pin never spends a
+				// request against an already-issued grant.
+				const authorityReachable =
+					!!this.env.GRANT_AUTHORITY_URL || !!(this.env as { AUTHORITY?: Fetcher }).AUTHORITY;
+				if (
+					this.#attestationMode() === 'separate' &&
+					authorityReachable &&
+					(await this.ctx.storage.get<string>(USER_GRANT_B64_KEY)) === undefined
+				)
+					await this.schedule(0, 'acquireUserGrant', {});
+			}
+			return Response.json({ principal, publicKeyXY: xyHex, pinned: pinned === undefined });
+		}
+
+		// The client confirms it signed a sealing delegation for the user's log
+		// (delegateSealing with the browser root — or delegateSealingKs256 on
+		// the legacy wallet shape — ran browser-side; the DO cannot observe it,
+		// the coordinator has no read API). Held user leaves are released by
+		// the drain this schedules. Worst case for a false claim is the
+		// pre-hold behavior: leaves sequence and wait on the sealer.
 		if (request.method === 'POST' && url.pathname.endsWith('/user-sealing-delegated')) {
 			await this.ctx.storage.put(USER_SEALING_DELEGATED_KEY, Date.now());
 			await this.schedule(1, 'drainCommitments', {});
@@ -1640,7 +1722,11 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 				// A top-up purchase (W4c) must bypass the authority's per-address
 				// idempotence cache, or it would hand back the spent batch's grant.
 				const renew = (await this.ctx.storage.get<boolean>(USER_GRANT_RENEWAL_KEY)) === true;
-				const grant = await authority.payUserGrant(principal, body.xPayment, { renew });
+				const publicKeyXY = await this.ctx.storage.get<string>(USER_ROOT_XY_KEY);
+				const grant = await authority.payUserGrant(principal, body.xPayment, {
+					renew,
+					...(publicKeyXY ? { publicKeyXY } : {})
+				});
 				const { logId } = await this.#storeUserGrant(grant);
 				// Kick the drain so held/queued user leaves register now that we have
 				// a grant, and grant-at-bind's follow-on work (public-root upload,

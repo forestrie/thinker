@@ -156,17 +156,22 @@ export class GrantAuthorityClient {
 	}
 
 	/**
-	 * Endorse the user's wallet key (`grant_user`, grantData = 20-byte address).
-	 * On a payment-gated lane (W4b) the authority answers 402 with the challenge
-	 * to sign — the caller relays it to the browser wallet, then calls
-	 * {@link payUserGrant}. On a dark lane it issues straight away.
+	 * Endorse the user's log root (`grant_user`). Two custody shapes
+	 * (plan-2608-13 Phase 4a): with `publicKeyXY` (hex, 64-byte P-256 x‖y) the
+	 * grantData is the browser-held ES256 root; without it, the legacy 20-byte
+	 * KS256 wallet address. The subject — and the payment identity — is the
+	 * wcc-1 address either way. On a payment-gated lane (W4b) the authority
+	 * answers 402 with the challenge to sign — the caller relays it to the
+	 * browser wallet, then calls {@link payUserGrant}. On a dark lane it
+	 * issues straight away.
 	 */
 	async requestUserGrant(
 		address: string,
-		opts: { renew?: boolean } = {}
+		opts: { renew?: boolean; publicKeyXY?: string } = {}
 	): Promise<UserGrantResult> {
 		const res = await this.#post('/grants/user', {
 			address,
+			...(opts.publicKeyXY ? { publicKeyXY: opts.publicKeyXY } : {}),
 			paymentCommitment: await this.payment.commitment('grant_user', address),
 			// Top-up (W4c): bypass the authority's per-address idempotence cache —
 			// a new batch is a NEW grant on a new log (O3), never the spent one.
@@ -192,12 +197,13 @@ export class GrantAuthorityClient {
 	async payUserGrant(
 		address: string,
 		xPayment: string,
-		opts: { renew?: boolean } = {}
+		opts: { renew?: boolean; publicKeyXY?: string } = {}
 	): Promise<IssuedGrant> {
 		return this.#asIssued(
 			'/grants/user',
 			await this.#post('/grants/user', {
 				address,
+				...(opts.publicKeyXY ? { publicKeyXY: opts.publicKeyXY } : {}),
 				xPayment,
 				...(opts.renew ? { renew: true } : {})
 			})
