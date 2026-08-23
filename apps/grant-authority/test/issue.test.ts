@@ -9,9 +9,12 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 import { createPrivateKey, generateKeyPairSync } from 'node:crypto';
+import { decodeCoseSign1, decodeGrantPayload } from '@forestrie/encoding';
+import { hasRequiresUserVerification } from '@forestrie/grant-builder';
 import {
 	IssuancePending,
 	PaymentRequired,
+	buildCreationGrant,
 	issueCreationGrant,
 	type IssuanceAuthority,
 	type IssueContext
@@ -121,6 +124,72 @@ describe('happy path', () => {
 			0
 		);
 		expect(agent.maxHeight).toBe(0);
+	});
+});
+
+describe('the UV policy flag (plan-2608-13 4.4, Q3)', () => {
+	// Custodian profile: the payload is the SHA-256 of the grant v0 CBOR; the
+	// CBOR itself rides the unprotected header at -65538.
+	const grantFlagsOf = (sign1: Uint8Array) => {
+		const decoded = decodeCoseSign1(sign1);
+		expect(decoded).not.toBeNull();
+		const grantCbor = (decoded!.unprotected as Map<number, Uint8Array>).get(-65538);
+		expect(grantCbor).toBeInstanceOf(Uint8Array);
+		return decodeGrantPayload(grantCbor!).grant;
+	};
+
+	const flagsOf = async (requiresUserVerification: boolean) => {
+		const ctx = await makeContext(vi.fn<typeof fetch>());
+		const built = await buildCreationGrant(
+			AUTHORITY,
+			new Uint8Array(64).fill(7),
+			16,
+			ctx.privateKey,
+			requiresUserVerification
+		);
+		return grantFlagsOf(built.sign1);
+	};
+
+	it('stamps GF_REQUIRES_USER_VERIFICATION when asked', async () => {
+		expect(hasRequiresUserVerification(await flagsOf(true))).toBe(true);
+	});
+
+	// Per-log policy, never a constant (R1): the default grant must stay
+	// byte-2-clear — an ES256/KS256-delegated log with this bit set would have
+	// every checkpoint rejected fail-closed on-chain.
+	it('leaves byte 2 clear by default', async () => {
+		expect(hasRequiresUserVerification(await flagsOf(false))).toBe(false);
+	});
+
+	it('threads through issueCreationGrant to the signed payload', async () => {
+		const fetchImpl = vi
+			.fn<typeof fetch>()
+			.mockResolvedValueOnce(registerAccepted())
+			.mockResolvedValueOnce(sequenced())
+			.mockResolvedValueOnce(receiptReady());
+		const store = memoryIssuerStore();
+		const ctx = await makeContext(fetchImpl, store);
+
+		await issueCreationGrant(
+			ctx,
+			AUTHORITY,
+			'user',
+			'0xuv',
+			new Uint8Array(64).fill(9),
+			16,
+			undefined,
+			true
+		);
+
+		// The registered grant rides the Authorization header — decode it back.
+		const auth = (fetchImpl.mock.calls[0]![1]?.headers as Record<string, string>).Authorization;
+		const b64 = auth
+			.replace(/^Forestrie-Grant\s+/i, '')
+			.replace(/-/g, '+')
+			.replace(/_/g, '/');
+		const padded = b64 + '='.repeat((4 - (b64.length % 4)) % 4);
+		const sign1 = Uint8Array.from(atob(padded), (c) => c.charCodeAt(0));
+		expect(hasRequiresUserVerification(grantFlagsOf(sign1))).toBe(true);
 	});
 });
 

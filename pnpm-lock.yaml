@@ -15,11 +15,11 @@ importers:
         specifier: ^10.0.1
         version: 10.0.1(eslint@10.8.1(jiti@2.7.0))
       '@forestrie/encoding':
-        specifier: ^0.5.0
-        version: 0.5.0
+        specifier: ^0.6.0
+        version: 0.6.0
       '@forestrie/grant-builder':
-        specifier: ^0.2.1
-        version: 0.2.1
+        specifier: ^0.4.0
+        version: 0.4.0
       '@forestrie/scrapi-client':
         specifier: ^0.1.3
         version: 0.1.3
@@ -54,11 +54,11 @@ importers:
   apps/grant-authority:
     dependencies:
       '@forestrie/encoding':
-        specifier: ^0.5.0
-        version: 0.5.0
+        specifier: ^0.6.0
+        version: 0.6.0
       '@forestrie/grant-builder':
-        specifier: ^0.2.1
-        version: 0.2.1
+        specifier: ^0.4.0
+        version: 0.4.0
       '@forestrie/scrapi-client':
         specifier: ^0.1.3
         version: 0.1.3
@@ -890,8 +890,8 @@ packages:
   '@forestrie/encoding@0.6.0':
     resolution: {integrity: sha512-REzdL++f/XBKxtrjMLEv/IrW2XDcviIRHLd48L3jVSZBTsma3E6isFPivpJSI/BRZdNFVGQjj+phLs+wpueebA==}
 
-  '@forestrie/grant-builder@0.2.1':
-    resolution: {integrity: sha512-UW0mzJyqRCumfF/Gr0SQUwBaHw2nZMp3mtmYuAKUTgMu3M1r/9TXlb/l6MttDKayn4s5HoAADs2+ry2YNliZ/Q==}
+  '@forestrie/grant-builder@0.4.0':
+    resolution: {integrity: sha512-lHuIUUQpjDmhx498GpxiyHjZrsx6DbWOn943Qf1BgTsyLFHtfAzQmKtzWcwuNLrTBFGR5UXmtKJxqiBpiYLHDA==}
 
   '@forestrie/merklelog@0.3.0':
     resolution: {integrity: sha512-u2bFI8u2cW9uZij/x0aKBRT+asnpaqJCFMPGitQfOJSY8hGmNSbAP0LuFDVO9mtB2M/Ata/lABBur49g5ZxfcA==}
@@ -4449,9 +4449,9 @@ snapshots:
     dependencies:
       '@noble/curves': 1.9.7
 
-  '@forestrie/grant-builder@0.2.1':
+  '@forestrie/grant-builder@0.4.0':
     dependencies:
-      '@forestrie/encoding': 0.5.0
+      '@forestrie/encoding': 0.6.0
       '@noble/curves': 1.9.7
       '@noble/hashes': 1.8.0
 

@@ -15,15 +15,19 @@ import {
 	fetchReceipts,
 	kickReceiptCollection,
 	payUserGrant,
+	postCustodyPending,
+	postUserRoot,
+	ScribeApiError,
 	type DemoTurnCounters,
 	type IdentityResponse,
 	type ReceiptsExport,
 	type WorkExportWire
 } from './scribe-api.ts';
+import { bootRegistration } from './custody.ts';
 import type { ScribeSession } from './session.svelte.ts';
 import type { DemoWallet } from './wallet.svelte.ts';
 import type { UserRootKey } from './user-root.ts';
-import type { PasskeyRoot } from './passkey.ts';
+import { PasskeyRoot } from './passkey.ts';
 import type { TurnVault } from './vault.svelte.ts';
 import { hexToBytes } from './utils.ts';
 
@@ -64,8 +68,26 @@ export class ProofPanel {
 	verifying = $state(false);
 	error = $state<string | null>(null);
 
+	/**
+	 * Root onboarding (4.3, ADR-0064): where this browser stands on declaring
+	 * its log root. `needs-activation` = WebAuthn is available and NO custody
+	 * shape is pinned — passkey creation waits behind the explicit "Activate
+	 * your log" gesture, and chat is locked (turn admission needs the root).
+	 * `reset-required` = the DO holds a root this browser no longer does.
+	 */
+	onboarding = $state<'pending' | 'needs-activation' | 'registered' | 'reset-required' | 'error'>(
+		'pending'
+	);
+	onboardingDetail = $state<string | null>(null);
+	/** Which custody shape won: the passkey root, or the 4a session root. */
+	custody = $state<'passkey' | 'session' | null>(null);
+	/** True while the activation ceremony's gestures are in flight. */
+	activating = $state(false);
+
 	delegation = $state<'idle' | 'working' | 'done' | 'error'>('idle');
 	delegationDetail = $state<string | null>(null);
+	/** Sealing-lease expiry (epoch seconds) from THIS session's delegation. */
+	#leaseExpiresAt = $state<number | null>(null);
 
 	/** x402 user-grant purchase (W4b): the wallet signs the parked challenge. */
 	payment = $state<'idle' | 'paying' | 'paid' | 'error'>('idle');
@@ -89,6 +111,160 @@ export class ProofPanel {
 		this.#userRoot = userRoot;
 		this.#vault = vault;
 		this.#passkey = passkey;
+	}
+
+	/**
+	 * The mount-time half of onboarding (4.3) — NO user gesture available, so
+	 * this only re-posts a shape that already exists or defers. The decision
+	 * table is `bootRegistration` (custody.ts): an existing passkey re-posts
+	 * the endorsed shape silently (endorsement cached — one gesture EVER); a
+	 * WebAuthn-free runtime posts the 4a session root; anything else declares
+	 * the custody choice PENDING to the DO — which then holds `grant_user`
+	 * until a root lands — and waits for the activation gesture.
+	 */
+	async registerRoot(): Promise<void> {
+		try {
+			const plan = bootRegistration({
+				webauthnSupported: this.#passkey !== null && PasskeyRoot.supported(),
+				hasPasskeyRecord: ((await this.#passkey?.currentPublicKeyXY()) ?? null) !== null
+			});
+			if (plan === 'endorsed-post') {
+				try {
+					await this.#postEndorsedRoot();
+				} catch (err) {
+					if (err instanceof ScribeApiError && err.status === 409) {
+						// Legacy instance: the pinned root predates passkey custody
+						// (it is the 4a session key) — the bare idempotent post
+						// stands, and upgrading means an identity reset (ADR-0064).
+						await this.#postSessionRoot();
+					} else {
+						// Likely a re-endorsement needing a gesture (session key
+						// rotated) — the activation button retries WITH one.
+						this.onboarding = 'needs-activation';
+						this.onboardingDetail = String(err);
+					}
+				}
+			} else if (plan === 'bare-post') {
+				await this.#postSessionRoot();
+			} else {
+				const pending = await postCustodyPending(this.#session.sub!, await this.#session.ensure());
+				if (!pending.custodyPending && pending.publicKeyXY) {
+					// A root was pinned in an earlier session. If it is our session
+					// key, this is settled 4a custody; anything else is a key this
+					// browser no longer holds.
+					if (pending.publicKeyXY === (await this.#userRoot.publicKeyXYHex()))
+						await this.#postSessionRoot();
+					else {
+						this.onboarding = 'reset-required';
+						this.onboardingDetail =
+							'this log is rooted by a key this browser no longer holds — reset your identity to start a fresh log';
+					}
+				} else {
+					this.onboarding = 'needs-activation';
+				}
+			}
+		} catch (err) {
+			this.onboarding = 'error';
+			this.onboardingDetail = String(err);
+		}
+	}
+
+	/**
+	 * THE activation gesture (4.3): create the passkey (browser prompt),
+	 * endorse the session key (assertion prompt — ADR-0064's one extra
+	 * gesture), and post root + session + endorsement. Must run from a click:
+	 * `credentials.create()` needs a user activation.
+	 */
+	async activateWithPasskey(): Promise<void> {
+		if (this.activating) return;
+		this.activating = true;
+		this.onboardingDetail = null;
+		try {
+			const record = await this.#passkey?.create();
+			if (!record) {
+				this.onboardingDetail =
+					'passkey creation was refused or cancelled — try again, or continue without one';
+				return;
+			}
+			await this.#postEndorsedRoot();
+			await this.refresh();
+		} catch (err) {
+			if (err instanceof ScribeApiError && err.status === 409) {
+				this.onboarding = 'reset-required';
+				this.onboardingDetail =
+					'a different root is already pinned to this log — reset your identity to re-root';
+			} else {
+				this.onboardingDetail = String(err);
+			}
+		} finally {
+			this.activating = false;
+		}
+	}
+
+	/**
+	 * The explicit 4a opt-out: pin the session key as the log ROOT. What used
+	 * to happen silently at page load now costs a deliberate click, because it
+	 * is one-way — upgrading to a passkey afterwards means an identity reset.
+	 */
+	async continueWithoutPasskey(): Promise<void> {
+		if (this.activating) return;
+		this.activating = true;
+		this.onboardingDetail = null;
+		try {
+			await this.#postSessionRoot();
+			await this.refresh();
+		} catch (err) {
+			this.onboardingDetail = String(err);
+		} finally {
+			this.activating = false;
+		}
+	}
+
+	async #postEndorsedRoot(): Promise<void> {
+		const rootHex = await this.#passkey!.publicKeyXYHex();
+		if (!rootHex) throw new Error('no passkey record to post');
+		const endorsementB64 = await this.#passkey!.ensureEndorsement(
+			await this.#userRoot.publicKeyXY()
+		);
+		await postUserRoot(this.#session.sub!, await this.#session.ensure(), rootHex, {
+			sessionPublicKeyXY: await this.#userRoot.publicKeyXYHex(),
+			endorsementB64
+		});
+		this.custody = 'passkey';
+		this.onboarding = 'registered';
+		this.onboardingDetail = null;
+	}
+
+	/**
+	 * The passkey root to dispatch on, respecting the SETTLED custody shape:
+	 * under session custody (including the legacy 409 fallback) a stray local
+	 * passkey record must not win — the DO's pinned root is the session key,
+	 * and a WebAuthn ceremony against it could never verify.
+	 */
+	async #passkeyRootXY(): Promise<Uint8Array | null> {
+		if (this.custody === 'session') return null;
+		return (await this.#passkey?.currentPublicKeyXY()) ?? null;
+	}
+
+	async #postSessionRoot(): Promise<void> {
+		try {
+			await postUserRoot(
+				this.#session.sub!,
+				await this.#session.ensure(),
+				await this.#userRoot.publicKeyXYHex()
+			);
+		} catch (err) {
+			if (err instanceof ScribeApiError && err.status === 409) {
+				this.onboarding = 'reset-required';
+				this.onboardingDetail =
+					'this log is rooted by a different key — reset your identity to start a fresh log';
+				return;
+			}
+			throw err;
+		}
+		this.custody = 'session';
+		this.onboarding = 'registered';
+		this.onboardingDetail = null;
 	}
 
 	/** The user's locally-kept copy of a prompt, if this browser still has it. */
@@ -118,6 +294,20 @@ export class ProofPanel {
 		return (
 			this.delegation === 'done' ||
 			(this.export?.forestrie.userSealingDelegated ?? this.identity?.userSealingDelegated ?? false)
+		);
+	}
+
+	/**
+	 * When the sealing lease expires (epoch seconds): this session's own
+	 * delegation first, else the DO-exported claim from an earlier one (4.3).
+	 * Null = no lease on record (pre-4.3 confirmation, or never delegated).
+	 */
+	get sealingLeaseExpiresAt(): number | null {
+		return (
+			this.#leaseExpiresAt ??
+			this.export?.forestrie.userSealingLeaseExpiresAt ??
+			this.identity?.userSealingLeaseExpiresAt ??
+			null
 		);
 	}
 
@@ -176,6 +366,15 @@ export class ProofPanel {
 		} finally {
 			this.refreshing = false;
 		}
+		// Embed mode has no user log to root, so a deferred custody choice has
+		// nothing to choose — settle on the 4a session shape (turn admission
+		// still verifies envelopes against it). The mode is only knowable from
+		// the DO, and the pending declaration had to land before this fetch.
+		if (this.export?.attestationMode === 'embed' && this.onboarding === 'needs-activation')
+			await this.#postSessionRoot().catch((err) => {
+				this.onboarding = 'error';
+				this.onboardingDetail = String(err);
+			});
 		// Buy the user grant if a payment-gated lane parked a challenge (W4b).
 		// Fire-and-forget: single-flight inside, and it refreshes on success.
 		if (this.payment !== 'error') void this.ensureUserGrantPaid();
@@ -283,8 +482,13 @@ export class ProofPanel {
 		if (this.#pollTimer) clearTimeout(this.#pollTimer);
 		// Keep polling while receipts are in flight, and during onboarding
 		// while grant-at-bind is still creating the user's log (~a minute) —
-		// the activation button waits on its id.
-		const onboarding = this.export?.attestationMode === 'separate' && this.userLogId === null;
+		// the authorize button waits on its id. NOT while the custody choice
+		// is still pending (4.3): the DO is deliberately idle then, and the
+		// next move is the user's gesture, not a poll.
+		const onboarding =
+			this.export?.attestationMode === 'separate' &&
+			this.userLogId === null &&
+			this.onboarding === 'registered';
 		if (!this.anyInFlight && !onboarding) return;
 		this.#pollTimer = setTimeout(() => {
 			void this.refresh();
@@ -311,7 +515,7 @@ export class ProofPanel {
 			// passkey and the envelope signer is the endorsed session key; under
 			// 4a they are the same WebCrypto key.
 			const sessionXY = await this.#userRoot.publicKeyXY();
-			const passkeyXY = (await this.#passkey?.currentPublicKeyXY()) ?? null;
+			const passkeyXY = await this.#passkeyRootXY();
 			const result = await verifyWorkReceipt(
 				// The locally-kept opening rides along when we have it, so the
 				// check list gains `input-binding`: this text, and no other, is
@@ -427,7 +631,7 @@ export class ProofPanel {
 			// Passkey custody (4.2, ADR-0063): the ceremony signs with the
 			// authenticator — two gestures, one per artifact (certificate +
 			// on-chain proof). Otherwise the 4a session-root path stands.
-			const passkeyXY = (await this.#passkey?.currentPublicKeyXY()) ?? null;
+			const passkeyXY = await this.#passkeyRootXY();
 			const params = { coordinatorUrl, logId: userLogId, knownSealerKeyB64 };
 			const result = passkeyXY
 				? await delegateSealingWebauthn(
@@ -437,15 +641,23 @@ export class ProofPanel {
 					)
 				: await delegateSealing(await this.#userRoot.asKeyProvider(), params);
 			this.delegation = 'done';
+			// The delegation is a LEASE (~6h on the demo lane): keep its expiry
+			// so the panel can surface the re-ceremony instead of hiding it (4.3).
+			this.#leaseExpiresAt = result.expiresAt;
 			// Formatted immediately into a string — the Date never outlives this
 			// expression, so there is nothing for a SvelteDate to make reactive.
 			// eslint-disable-next-line svelte/prefer-svelte-reactivity
 			const expiry = new Date(result.expiresAt * 1000).toLocaleTimeString();
 			this.delegationDetail = `sealer ${result.sealerId} until ${expiry}`;
 			// Tell the DO: held user leaves release, and collection resumes
-			// for anything already waiting on the lane.
+			// for anything already waiting on the lane. The reported expiry
+			// makes the renewal countdown survive reloads and other tabs.
 			try {
-				await confirmUserSealingDelegated(this.#session.sub!, await this.#session.ensure());
+				await confirmUserSealingDelegated(
+					this.#session.sub!,
+					await this.#session.ensure(),
+					result.expiresAt
+				);
 			} catch (err) {
 				console.warn('delegation confirmation failed — leaves release on a later drain', err);
 			}

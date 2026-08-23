@@ -52,6 +52,8 @@ export interface IdentityResponse {
 	agentLogId: string | null;
 	userLogId: string | null;
 	userSealingDelegated?: boolean;
+	/** Client-reported sealing-lease expiry (epoch seconds, 4.3); null before. */
+	userSealingLeaseExpiresAt?: number | null;
 	/**
 	 * A pending x402 `X-PAYMENT-REQUIRED` challenge (base64) the wallet must
 	 * sign to buy the user grant (plan-2608-09 W4b); null on dark lanes and
@@ -122,6 +124,8 @@ export interface ReceiptsExport {
 		/** The passkey's session-key endorsement (base64 COSE Sign1). */
 		userRootEndorsementB64?: string | null;
 		userSealingDelegated?: boolean;
+		/** Client-reported sealing-lease expiry (epoch seconds, 4.3). */
+		userSealingLeaseExpiresAt?: number | null;
 		/** Pending x402 challenge (W4b) to sign for the user grant; else null. */
 		userGrantChallenge?: string | null;
 		/** Turns remaining in the purchased batch (W4c); null = unmetered. */
@@ -235,12 +239,42 @@ export async function postUserRoot(
 	);
 }
 
-/** Tell the DO the user's root key authorized sealing — releases held user leaves. */
-export async function confirmUserSealingDelegated(sub: string, token: string): Promise<void> {
+/**
+ * Declare the custody choice PENDING (4.3) — the instance's FIRST touch on a
+ * fresh identity where a passkey could still be created. Pins nothing; tells
+ * the DO not to issue `grant_user` until a root arrives (otherwise
+ * grant-at-bind would mint a wallet-address grant the activation ceremony can
+ * never re-root). The response reports a root already pinned in an earlier
+ * session, so the client can tell which shape won.
+ */
+export async function postCustodyPending(
+	sub: string,
+	token: string
+): Promise<{ custodyPending: boolean; publicKeyXY?: string }> {
+	return expectJson(
+		await fetch(`${agentPath(sub)}/user-root`, {
+			method: 'POST',
+			headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+			body: JSON.stringify({ custodyPending: true })
+		})
+	);
+}
+
+/**
+ * Tell the DO the user's root key authorized sealing — releases held user
+ * leaves. `expiresAt` (epoch seconds) is the delegation certificate's own
+ * lease expiry, exported back so the renewal countdown survives reloads (4.3).
+ */
+export async function confirmUserSealingDelegated(
+	sub: string,
+	token: string,
+	expiresAt?: number
+): Promise<void> {
 	await expectJson(
 		await fetch(`${agentPath(sub)}/user-sealing-delegated`, {
 			method: 'POST',
-			headers: { Authorization: `Bearer ${token}` }
+			headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+			body: JSON.stringify(expiresAt !== undefined ? { expiresAt } : {})
 		})
 	);
 }

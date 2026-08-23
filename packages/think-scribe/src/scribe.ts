@@ -258,6 +258,24 @@ const USER_GRANT_RENEWAL_KEY = 'forestrie:userGrantRenewal';
  * flow: never register a leaf into a log nothing is authorized to seal.
  */
 const USER_SEALING_DELEGATED_KEY = 'forestrie:userSealingDelegatedAt';
+/**
+ * When the CLIENT-reported sealing lease on the user's log expires (epoch
+ * SECONDS — the delegation certificate's own unit, plan-2608-13 4.3).
+ * Advisory display state, exactly as trustworthy as the delegated-at claim
+ * above: the DO cannot observe the coordinator, so the browser reports what
+ * it signed and the UI surfaces the ~6h re-ceremony instead of hiding it.
+ * A false value's worst case is a mistimed renewal prompt.
+ */
+const USER_SEALING_LEASE_EXPIRES_KEY = 'forestrie:userSealingLeaseExpiresAt';
+/**
+ * Set (epoch ms) while the browser is still CHOOSING its custody shape
+ * (plan-2608-13 4.3): it declared that it may yet create a passkey, so no
+ * root is pinned and `grant_user` must NOT be issued — the grantData would
+ * be the wallet address, a shape the activation ceremony can never re-root.
+ * Cleared by the root pin, which re-kicks acquisition. A client that never
+ * declares (legacy UIs, smoke harnesses) keeps today's issue-at-bind path.
+ */
+const USER_CUSTODY_PENDING_KEY = 'forestrie:userCustodyPendingAt';
 const DELEGATION_EXPIRES_KEY = 'forestrie:delegationExpiresAt';
 /** Renew the sealing lease when it has less runway than this (seconds). */
 const DELEGATION_RENEW_MARGIN_S = 600;
@@ -566,9 +584,24 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 		// 64-byte ES256 key (the shipped path — canopy auto-forwards ES256 owner
 		// keys to the coordinator); without one, the legacy wallet address.
 		const publicKeyXY = await this.ctx.storage.get<string>(USER_ROOT_XY_KEY);
+		// 4.3: the browser said its custody choice is still pending, so there is
+		// no root to endorse yet — wait for the pin (which re-kicks acquisition)
+		// rather than minting a wallet-address grant it can never re-root.
+		if (
+			!publicKeyXY &&
+			(await this.ctx.storage.get<number>(USER_CUSTODY_PENDING_KEY)) !== undefined
+		)
+			return null;
 		const result = await authority.requestUserGrant(principal, {
 			renew,
-			...(publicKeyXY ? { publicKeyXY } : {})
+			...(publicKeyXY ? { publicKeyXY } : {}),
+			// Q3 (plan-2608-13 4.4): a passkey-rooted log's delegations are
+			// WebAuthn assertions, which can honour user verification — declare
+			// the policy on the grant. Session custody (4a) delegates via plain
+			// ES256, which cannot, and the contract rejects the mismatch
+			// fail-closed — so the flag rides ONLY under passkey custody
+			// (endorsed session key pinned alongside the root).
+			...((await this.#requiresUserVerification()) ? { requiresUserVerification: true } : {})
 		});
 		if (result.kind === 'payment_required') {
 			// Park the challenge for the browser; stay embed-only until it's paid.
@@ -582,14 +615,25 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 		return this.#storeUserGrant(result.grant);
 	}
 
+	/**
+	 * Is this instance under passkey custody (root = passkey, endorsed session
+	 * key pinned — ADR-0064)? That is exactly when its sealing delegations are
+	 * WebAuthn ceremonies, so exactly when a grant may demand UV (Q3/4.4).
+	 */
+	async #requiresUserVerification(): Promise<boolean> {
+		return (await this.ctx.storage.get<string>(USER_SESSION_XY_KEY)) !== undefined;
+	}
+
 	/** Persist an issued user grant + its batch ceiling; clear any challenge. */
 	async #storeUserGrant(grant: IssuedGrant): Promise<{ grantB64: string; logId: string }> {
 		// A different logId means a NEW batch log (top-up, O3): the wallet's
 		// sealing authorization was for the old log, so its leaves must hold
 		// until the wallet delegates the new one.
 		const previousLogId = await this.ctx.storage.get<string>(USER_LOG_ID_KEY);
-		if (previousLogId !== undefined && previousLogId !== grant.logId)
+		if (previousLogId !== undefined && previousLogId !== grant.logId) {
 			await this.ctx.storage.delete(USER_SEALING_DELEGATED_KEY);
+			await this.ctx.storage.delete(USER_SEALING_LEASE_EXPIRES_KEY);
+		}
 		await this.ctx.storage.put(USER_GRANT_B64_KEY, grant.grantB64);
 		await this.ctx.storage.put(USER_LOG_ID_KEY, grant.logId);
 		if (typeof grant.maxHeight === 'number') {
@@ -1484,6 +1528,9 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 			hasGrant: false,
 			hasParkedChallenge:
 				(await this.ctx.storage.get<string>(USER_GRANT_CHALLENGE_KEY)) !== undefined,
+			custodyPending:
+				(await this.ctx.storage.get<string>(USER_ROOT_XY_KEY)) === undefined &&
+				(await this.ctx.storage.get<number>(USER_CUSTODY_PENDING_KEY)) !== undefined,
 			lastAttemptAt: (await this.ctx.storage.get<number>(USER_GRANT_ATTEMPT_AT_KEY)) ?? null,
 			now: Date.now()
 		});
@@ -1533,6 +1580,8 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 				userLogId: (await this.ctx.storage.get<string>(USER_LOG_ID_KEY)) ?? null,
 				userSealingDelegated:
 					(await this.ctx.storage.get<number>(USER_SEALING_DELEGATED_KEY)) !== undefined,
+				userSealingLeaseExpiresAt:
+					(await this.ctx.storage.get<number>(USER_SEALING_LEASE_EXPIRES_KEY)) ?? null,
 				// A pending x402 challenge (W4b) the browser wallet must sign to buy
 				// the user grant; null on dark lanes and once paid.
 				userGrantChallenge: (await this.ctx.storage.get<string>(USER_GRANT_CHALLENGE_KEY)) ?? null,
@@ -1668,6 +1717,10 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 						(await this.ctx.storage.get<string>(USER_ROOT_ENDORSEMENT_KEY)) ?? null,
 					userSealingDelegated:
 						(await this.ctx.storage.get<number>(USER_SEALING_DELEGATED_KEY)) !== undefined,
+					// Client-reported lease expiry (epoch seconds) — the 4.3 renewal
+					// surfacing; polled so a reload or second tab sees the countdown.
+					userSealingLeaseExpiresAt:
+						(await this.ctx.storage.get<number>(USER_SEALING_LEASE_EXPIRES_KEY)) ?? null,
 					// Polled every refresh (identity is pinned at first fetch): the
 					// browser picks up the parked x402 challenge here and pays it (W4b).
 					userGrantChallenge:
@@ -1708,7 +1761,29 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 				publicKeyXY?: string;
 				sessionPublicKeyXY?: string;
 				endorsementB64?: string;
+				custodyPending?: boolean;
 			};
+			// 4.3: `{custodyPending: true}` pins NOTHING — it declares the browser
+			// is still choosing its custody shape (it may create a passkey behind
+			// the "Activate your log" gesture), so grant_user must wait for the
+			// root rather than issue over the wallet address. Sent as the
+			// instance's FIRST touch, before any other route can trigger
+			// grant-at-bind's issuance.
+			if (body.custodyPending === true) {
+				const alreadyPinned = await this.ctx.storage.get<string>(USER_ROOT_XY_KEY);
+				if (alreadyPinned !== undefined)
+					// The choice was made in an earlier session; hand the pinned root
+					// back so the client can tell which shape won (and show "reset to
+					// re-root" when it no longer holds that key).
+					return Response.json({
+						principal,
+						publicKeyXY: alreadyPinned,
+						pinned: false,
+						custodyPending: false
+					});
+				await this.ctx.storage.put(USER_CUSTODY_PENDING_KEY, Date.now());
+				return Response.json({ principal, custodyPending: true });
+			}
 			const xyHex = String(body.publicKeyXY ?? '').toLowerCase();
 			if (!/^[0-9a-f]{128}$/.test(xyHex))
 				return new Response('publicKeyXY must be 128 hex chars (64-byte P-256 x||y)', {
@@ -1765,6 +1840,9 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 				await this.ctx.storage.put(USER_SESSION_XY_KEY, sessionHex);
 				await this.ctx.storage.put(USER_ROOT_ENDORSEMENT_KEY, endorsementB64);
 			}
+			// The custody choice has landed, whichever shape it took — release
+			// any deferred grant acquisition (4.3).
+			await this.ctx.storage.delete(USER_CUSTODY_PENDING_KEY);
 			if (pinned === undefined) {
 				await this.ctx.storage.put(USER_ROOT_XY_KEY, xyHex);
 				// The root arriving can unblock grant_user: when this request is
@@ -1797,6 +1875,21 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 		// pre-hold behavior: leaves sequence and wait on the sealer.
 		if (request.method === 'POST' && url.pathname.endsWith('/user-sealing-delegated')) {
 			await this.ctx.storage.put(USER_SEALING_DELEGATED_KEY, Date.now());
+			// The certificate's own expiry (epoch seconds), reported by the same
+			// client whose delegated-at claim we already take on trust. Exported
+			// so the UI can surface the ~6h lease re-ceremony (4.3) across
+			// sessions; a bad value mistimes a renewal prompt, nothing more.
+			let expiresAt: number | undefined;
+			try {
+				const body = (await request.json()) as { expiresAt?: number };
+				if (typeof body.expiresAt === 'number' && Number.isFinite(body.expiresAt))
+					expiresAt = body.expiresAt;
+			} catch {
+				// No body — the pre-4.3 client shape; the confirmation stands alone.
+			}
+			if (expiresAt !== undefined)
+				await this.ctx.storage.put(USER_SEALING_LEASE_EXPIRES_KEY, expiresAt);
+			else await this.ctx.storage.delete(USER_SEALING_LEASE_EXPIRES_KEY);
 			await this.schedule(1, 'drainCommitments', {});
 			return Response.json({ principal, delegated: true });
 		}
@@ -1820,7 +1913,10 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 				const publicKeyXY = await this.ctx.storage.get<string>(USER_ROOT_XY_KEY);
 				const grant = await authority.payUserGrant(principal, body.xPayment, {
 					renew,
-					...(publicKeyXY ? { publicKeyXY } : {})
+					...(publicKeyXY ? { publicKeyXY } : {}),
+					// Same custody dispatch as #userGrant (Q3/4.4): UV only for a
+					// passkey-rooted log, whose delegations can honour it.
+					...((await this.#requiresUserVerification()) ? { requiresUserVerification: true } : {})
 				});
 				const { logId } = await this.#storeUserGrant(grant);
 				// Kick the drain so held/queued user leaves register now that we have

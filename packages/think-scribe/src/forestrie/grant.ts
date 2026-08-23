@@ -167,7 +167,7 @@ export class GrantAuthorityClient {
 	 */
 	async requestUserGrant(
 		address: string,
-		opts: { renew?: boolean; publicKeyXY?: string } = {}
+		opts: { renew?: boolean; publicKeyXY?: string; requiresUserVerification?: boolean } = {}
 	): Promise<UserGrantResult> {
 		const res = await this.#post('/grants/user', {
 			address,
@@ -175,7 +175,11 @@ export class GrantAuthorityClient {
 			paymentCommitment: await this.payment.commitment('grant_user', address),
 			// Top-up (W4c): bypass the authority's per-address idempotence cache —
 			// a new batch is a NEW grant on a new log (O3), never the spent one.
-			...(opts.renew ? { renew: true } : {})
+			...(opts.renew ? { renew: true } : {}),
+			// Q3 (plan-2608-13 4.4): stamp GF_REQUIRES_USER_VERIFICATION on the
+			// grant. Per-log policy — only valid with an ES256 `publicKeyXY` root
+			// whose delegations are WebAuthn ceremonies (passkey custody).
+			...(opts.requiresUserVerification ? { requiresUserVerification: true } : {})
 		});
 		if (res.status === 402) {
 			const challengeB64 = res.body.challengeB64;
@@ -197,7 +201,7 @@ export class GrantAuthorityClient {
 	async payUserGrant(
 		address: string,
 		xPayment: string,
-		opts: { renew?: boolean; publicKeyXY?: string } = {}
+		opts: { renew?: boolean; publicKeyXY?: string; requiresUserVerification?: boolean } = {}
 	): Promise<IssuedGrant> {
 		return this.#asIssued(
 			'/grants/user',
@@ -205,7 +209,8 @@ export class GrantAuthorityClient {
 				address,
 				...(opts.publicKeyXY ? { publicKeyXY: opts.publicKeyXY } : {}),
 				xPayment,
-				...(opts.renew ? { renew: true } : {})
+				...(opts.renew ? { renew: true } : {}),
+				...(opts.requiresUserVerification ? { requiresUserVerification: true } : {})
 			})
 		);
 	}
