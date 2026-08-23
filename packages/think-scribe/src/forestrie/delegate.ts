@@ -24,12 +24,15 @@
 import {
 	buildDelegationCertificateEs256,
 	buildDelegationCertificateKs256,
+	buildDelegationCertificateWebauthn,
+	buildOnchainDelegationToBeSignedWebauthn,
 	decodeDelegatedCoseKeyFromBytes,
 	parseDelegatedCoseKeyFromPayload,
 	parseDelegationCertificate,
 	signOnchainDelegationEs256,
 	signOnchainDelegationKs256,
-	type DelegationInput
+	type DelegationInput,
+	type SignWebauthnAssertion
 } from '@forestrie/delegation-cose';
 import {
 	decodeCborDeterministic,
@@ -45,6 +48,9 @@ import type { KeyProvider } from '../keys/provider.ts';
 // subpath without importing the package index, which drags the whole DO
 // (and its workers-types ambience) into their typecheck graph.
 export type { KeyProvider } from '../keys/provider.ts';
+// Ceremony callback types for delegateSealingWebauthn — re-exported for the
+// same reason as KeyProvider (browser callers import this subpath only).
+export type { SignWebauthnAssertion, WebauthnAssertionResult } from '@forestrie/delegation-cose';
 
 /** Horizon lease default: effectively unbounded (matches the CLI). */
 const DEFAULT_HORIZON_MMR_END = Number.MAX_SAFE_INTEGER;
@@ -179,7 +185,13 @@ async function submitCertificate(
 	onchainSignature: Uint8Array,
 	mmrStart: number,
 	mmrEnd: number,
-	fetchImpl: typeof fetch
+	fetchImpl: typeof fetch,
+	/**
+	 * WebAuthn root only (4.2): the on-chain proof's assertion parts. The
+	 * coordinator verifies them via the ADR-0008 contract mirror and
+	 * re-assembles the proof's `algData` from the stored fields at issue.
+	 */
+	onchainAssertion?: { authenticatorData: Uint8Array; clientDataJSON: Uint8Array }
 ): Promise<DelegateSealingResult> {
 	const info = parseDelegationCertificate(certificate);
 	const submitRes = await fetchImpl(`${params.coordinatorUrl}/api/delegations/certificate`, {
@@ -193,7 +205,13 @@ async function submitCertificate(
 			certificate: bytesToB64(certificate),
 			issuedAt: info.issuedAt,
 			expiresAt: info.expiresAt,
-			onchainSignature: bytesToB64(onchainSignature)
+			onchainSignature: bytesToB64(onchainSignature),
+			...(onchainAssertion
+				? {
+						onchainAuthenticatorData: bytesToB64(onchainAssertion.authenticatorData),
+						onchainClientDataJSON: bytesToB64(onchainAssertion.clientDataJSON)
+					}
+				: {})
 		})
 	});
 	if (!submitRes.ok)
@@ -315,5 +333,85 @@ export async function delegateSealingKs256(
 		mmrStart,
 		mmrEnd,
 		fetchImpl
+	);
+}
+
+/**
+ * WebAuthn variant (plan-2608-13 Phase 4.2, ADR-0063): the USER's log is
+ * owned by their passkey (grant_user's grantData = the passkey's 64-byte
+ * x‖y), and a passkey signs only WebAuthn assertions — one per artifact,
+ * two gestures per ceremony (Q1): the delegation certificate carries its
+ * own assertion envelope (unprotected label -65800), and the on-chain
+ * proof's assertion rides the submit's assertion fields so the coordinator
+ * can verify it (ADR-0008 contract mirror) and re-assemble `algData` at
+ * issue. Client-side only — the ceremony needs the authenticator.
+ *
+ * `getAssertion` is invoked twice, once per 32-byte challenge
+ * (`sha256(Sig_structure)` of each artifact); it drives
+ * `navigator.credentials.get` and returns the raw assertion parts with the
+ * signature converted to low-s P1363 (see `webauthnSignatureToP1363LowS`).
+ */
+export async function delegateSealingWebauthn(
+	rootPublicKeyXY: Uint8Array,
+	getAssertion: SignWebauthnAssertion,
+	params: DelegateSealingParams,
+	fetchImpl: typeof fetch = fetch
+): Promise<DelegateSealingResult> {
+	if (rootPublicKeyXY.length !== 64)
+		throw new DelegateError('passkey root public key must be 64 bytes x‖y');
+	const standing = await resolveStanding(params, fetchImpl);
+	const mmrStart = 0;
+	const mmrEnd = params.horizonMmrEnd ?? DEFAULT_HORIZON_MMR_END;
+	const logIdHex32 = bytesToHex(uuidToBytes(params.logId));
+	const delegatedPublicKeyBytes = b64ToBytes(standing.delegatedPublicKey);
+
+	const certInput: DelegationInput = {
+		logIdHex32,
+		mmrStart,
+		mmrEnd,
+		delegatedPublicKeyCbor: delegatedPublicKeyBytes
+	};
+	const ttlSeconds = params.ttlSeconds ?? standing.suggestedTtlSeconds;
+	if (ttlSeconds !== undefined) certInput.ttlSeconds = ttlSeconds;
+
+	// Certificate kid: 16-byte truncated SHA-256 of the raw uncompressed
+	// point — the same derivation as deriveEs256KidFromPublicKey, from
+	// coordinates (a passkey never yields a CryptoKey handle to derive from).
+	const point = new Uint8Array(65);
+	point[0] = 0x04;
+	point.set(rootPublicKeyXY, 1);
+	const rootKid = new Uint8Array(
+		await crypto.subtle.digest('SHA-256', point as BufferSource)
+	).slice(0, 16);
+
+	// Gesture 1: the certificate's own assertion (challenge binds its
+	// Sig_structure; the builder runs the ceremony and assembles the envelope).
+	const certificate = await buildDelegationCertificateWebauthn(certInput, rootKid, getAssertion);
+
+	// Gesture 2: the on-chain proof's assertion.
+	const delegated = parseDelegatedCoseKeyFromPayload(
+		decodeDelegatedCoseKeyFromBytes(delegatedPublicKeyBytes)
+	);
+	const onchainTbs = buildOnchainDelegationToBeSignedWebauthn({
+		logIdHex: logIdHex32,
+		mmrStart,
+		mmrEnd,
+		delegatedKeyX: delegated.x,
+		delegatedKeyY: delegated.y
+	});
+	const challenge = new Uint8Array(
+		await crypto.subtle.digest('SHA-256', onchainTbs.sigStructureBytes as BufferSource)
+	);
+	const assertion = await getAssertion(challenge);
+
+	return submitCertificate(
+		params,
+		standing,
+		certificate,
+		assertion.signature,
+		mmrStart,
+		mmrEnd,
+		fetchImpl,
+		{ authenticatorData: assertion.authenticatorData, clientDataJSON: assertion.clientDataJSON }
 	);
 }

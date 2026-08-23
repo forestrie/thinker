@@ -24,7 +24,8 @@ import {
 	parseReceipt,
 	univocityLeafHash,
 	verifyGrantReceiptOfflineWithKeys,
-	verifyReceiptOfflineWithKeys
+	verifyReceiptOfflineWithKeys,
+	verifySessionKeyEndorsement
 } from '@forestrie/receipt-verify';
 import {
 	PAYLOAD_DELEGATED_KEY,
@@ -206,7 +207,14 @@ export async function verifyWorkReceipt(
 	 * shape) or, since Phase 4a, the 64-byte P-256 x‖y of the browser-held
 	 * root key (ES256 shape). Length selects the verification rung.
 	 */
-	userTrustRoot?: Uint8Array | null
+	userTrustRoot?: Uint8Array | null,
+	/**
+	 * Leaf-envelope signer under passkey custody (Phase 4.1, ADR-0064): the
+	 * endorsed 64-byte session key — resolve it from the export's
+	 * endorsement via {@link resolveEndorsedSessionKey}. Defaults to
+	 * `userTrustRoot` (4a: the root IS the envelope signer).
+	 */
+	userEnvelopeKey?: Uint8Array | null
 ): Promise<WorkVerifyResult> {
 	const checks: WorkCheck[] = [];
 	const fail = (name: string, detail: string): WorkVerifyResult => {
@@ -294,12 +302,14 @@ export async function verifyWorkReceipt(
 			let signerDetail: string;
 			if (userEnvelopeAlg(envelope) === COSE_ALG_ES256) {
 				// ES256 shape (Phase 4a): no signer recovery — verify under the
-				// caller-trusted root key, which must therefore be present.
-				if (!userTrustRoot || userTrustRoot.length !== 64)
-					throw new ReceiptError('ES256 envelope needs the 64-byte user root key as trust anchor');
-				const verified = await verifyUserEnvelopeEs256(envelope, userTrustRoot);
+				// caller-trusted key. Under passkey custody (4.1) the signer is
+				// the endorsed session key, not the root.
+				const envelopeKey = userEnvelopeKey ?? userTrustRoot;
+				if (!envelopeKey || envelopeKey.length !== 64)
+					throw new ReceiptError('ES256 envelope needs a 64-byte user key as trust anchor');
+				const verified = await verifyUserEnvelopeEs256(envelope, envelopeKey);
 				claims = verified.claims;
-				signerDetail = `root x ${verified.kidHex.slice(0, 16)}…`;
+				signerDetail = `signer x ${verified.kidHex.slice(0, 16)}…`;
 			} else {
 				const verified = await verifyUserEnvelope(envelope);
 				claims = verified.claims;
@@ -688,4 +698,29 @@ export async function verifyUserLeafReceipt(
 	});
 
 	return { ok: checks.every((c) => c.ok), checks };
+}
+
+/**
+ * Resolve the endorsed session key from a receipts export under passkey
+ * custody (Phase 4.1, ADR-0064): verify the exported endorsement under the
+ * passkey root and return the 64-byte session key the leaves verify under.
+ * Throws {@link ReceiptError} when the endorsement does not verify — a
+ * broken endorsement must fail the chain, never fall back to the root.
+ *
+ * UV is not required here: an offline verifier has no deployment config in
+ * evidence (the DO enforced its own policy at onboarding, ADR-0064 §3).
+ */
+export async function resolveEndorsedSessionKey(
+	rootPublicKeyXY: Uint8Array,
+	endorsementB64: string
+): Promise<Uint8Array> {
+	if (rootPublicKeyXY.length !== 64) throw new ReceiptError('passkey root must be 64 bytes x‖y');
+	const result = await verifySessionKeyEndorsement(decodeBase64(endorsementB64), {
+		x: rootPublicKeyXY.slice(0, 32),
+		y: rootPublicKeyXY.slice(32, 64),
+		curve: 'P-256'
+	});
+	if (!result.ok)
+		throw new ReceiptError(`session-key endorsement did not verify: ${result.reason}`);
+	return result.sessionPublicKeyXY;
 }

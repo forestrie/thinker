@@ -5,7 +5,10 @@ import {
 	type ParentPolicyResult,
 	type WorkVerifyResult
 } from '@forestrie/think-scribe/forestrie/receipt';
-import { delegateSealing } from '@forestrie/think-scribe/forestrie/delegate';
+import {
+	delegateSealing,
+	delegateSealingWebauthn
+} from '@forestrie/think-scribe/forestrie/delegate';
 import {
 	confirmUserSealingDelegated,
 	fetchIdentity,
@@ -20,6 +23,7 @@ import {
 import type { ScribeSession } from './session.svelte.ts';
 import type { DemoWallet } from './wallet.svelte.ts';
 import type { UserRootKey } from './user-root.ts';
+import type { PasskeyRoot } from './passkey.ts';
 import type { TurnVault } from './vault.svelte.ts';
 import { hexToBytes } from './utils.ts';
 
@@ -48,6 +52,7 @@ export class ProofPanel {
 	#session: ScribeSession;
 	#wallet: DemoWallet;
 	#userRoot: UserRootKey;
+	#passkey: PasskeyRoot | null;
 	#vault: TurnVault;
 	#pollTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -71,11 +76,19 @@ export class ProofPanel {
 	policy = $state<'idle' | 'verifying' | 'done' | 'error'>('idle');
 	policyResult = $state<ParentPolicyResult | null>(null);
 
-	constructor(session: ScribeSession, wallet: DemoWallet, userRoot: UserRootKey, vault: TurnVault) {
+	constructor(
+		session: ScribeSession,
+		wallet: DemoWallet,
+		userRoot: UserRootKey,
+		vault: TurnVault,
+		/** Passkey custody (4.1): the log root when present; else 4a stands. */
+		passkey: PasskeyRoot | null = null
+	) {
 		this.#session = session;
 		this.#wallet = wallet;
 		this.#userRoot = userRoot;
 		this.#vault = vault;
+		this.#passkey = passkey;
 	}
 
 	/** The user's locally-kept copy of a prompt, if this browser still has it. */
@@ -292,16 +305,21 @@ export class ProofPanel {
 		if (!this.identity) return;
 		this.verifying = true;
 		try {
+			// Trust anchors from the browser's OWN custody, never the export's
+			// claim of them — the same out-of-band provenance rule as the agent
+			// key. Under passkey custody (4.1, ADR-0064) the trust root is the
+			// passkey and the envelope signer is the endorsed session key; under
+			// 4a they are the same WebCrypto key.
+			const sessionXY = await this.#userRoot.publicKeyXY();
+			const passkeyXY = (await this.#passkey?.currentPublicKeyXY()) ?? null;
 			const result = await verifyWorkReceipt(
 				// The locally-kept opening rides along when we have it, so the
 				// check list gains `input-binding`: this text, and no other, is
 				// what the user's root key signed a commitment to (D1/D4).
 				{ ...work, input: this.#vault.input(work.workId) ?? undefined },
 				hexToBytes(this.identity.publicKeyXY),
-				// User-leaf trust anchor = the browser's OWN root key (Phase 4a),
-				// not the export's claim of it — the same out-of-band provenance
-				// rule as the agent key.
-				await this.#userRoot.publicKeyXY()
+				passkeyXY ?? sessionXY,
+				sessionXY
 			);
 			this.verifications[work.workId] = { ...result, at: Date.now() };
 		} catch (err) {
@@ -406,11 +424,18 @@ export class ProofPanel {
 			return;
 		}
 		try {
-			const result = await delegateSealing(await this.#userRoot.asKeyProvider(), {
-				coordinatorUrl,
-				logId: userLogId,
-				knownSealerKeyB64
-			});
+			// Passkey custody (4.2, ADR-0063): the ceremony signs with the
+			// authenticator — two gestures, one per artifact (certificate +
+			// on-chain proof). Otherwise the 4a session-root path stands.
+			const passkeyXY = (await this.#passkey?.currentPublicKeyXY()) ?? null;
+			const params = { coordinatorUrl, logId: userLogId, knownSealerKeyB64 };
+			const result = passkeyXY
+				? await delegateSealingWebauthn(
+						passkeyXY,
+						(challenge) => this.#passkey!.getAssertion(challenge),
+						params
+					)
+				: await delegateSealing(await this.#userRoot.asKeyProvider(), params);
 			this.delegation = 'done';
 			// Formatted immediately into a string — the Date never outlives this
 			// expression, so there is nothing for a SvelteDate to make reactive.

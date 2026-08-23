@@ -2,6 +2,7 @@
 	import { onMount } from 'svelte';
 	import { DemoWallet } from '$lib/wallet.svelte.ts';
 	import { UserRootKey } from '$lib/user-root.ts';
+	import { PasskeyRoot } from '$lib/passkey.ts';
 	import { postUserRoot } from '$lib/scribe-api.ts';
 	import { ScribeSession } from '$lib/session.svelte.ts';
 	import { ScribeChat } from '$lib/chat.svelte.ts';
@@ -18,14 +19,20 @@
 
 	const wallet = new DemoWallet();
 	const session = new ScribeSession(wallet);
-	// The user's log root (Phase 4a): a non-extractable WebCrypto P-256 key —
-	// the wallet keeps only session auth and x402 payment (Q2 custody split).
+	// The user's per-turn signing key (Phase 4a): a non-extractable WebCrypto
+	// P-256 key — the wallet keeps only session auth and x402 payment (Q2
+	// custody split). Under passkey custody (4.1, ADR-0064) this key is the
+	// SESSION key, endorsed once by the passkey root below; with no
+	// authenticator it remains the log root itself (Q4 fallback).
 	const userRoot = new UserRootKey();
+	// The passkey log root (Phase 4.1): signs ceremonies only — every
+	// assertion costs a gesture, so per-turn leaves stay with the session key.
+	const passkey = new PasskeyRoot();
 	// The user's own copy of their prompts (D4). Keyed to the wallet: a reset
 	// identity starts with an empty vault, as it should.
 	const vault = new TurnVault(wallet.address);
 	const chat = new ScribeChat(session, userRoot, vault);
-	const proofs = new ProofPanelState(session, wallet, userRoot, vault);
+	const proofs = new ProofPanelState(session, wallet, userRoot, vault, passkey);
 
 	// A settled turn means new commitments are in flight — pull the export.
 	chat.onTurnSettled = () => void proofs.refresh();
@@ -39,6 +46,36 @@
 	let balance = $state<number | null>(null);
 	let balanceError = $state<string | null>(null);
 	const payment = $derived(paymentFromChallenge(proofs.grantChallenge));
+
+	/**
+	 * Onboard the user's log root (4.1, ADR-0064). Passkey path: create (or
+	 * load) the passkey, endorse the session key (one gesture, cached after),
+	 * post root + session + endorsement. Any refusal — no authenticator, a
+	 * cancelled gesture, a legacy instance whose pinned root is the session
+	 * key (409) — falls back to the 4a shape, which stands unchanged (Q4).
+	 */
+	async function registerUserRoot(): Promise<void> {
+		const sessionHex = await userRoot.publicKeyXYHex();
+		if (PasskeyRoot.supported()) {
+			try {
+				const rootHex = await passkey.publicKeyXYHex();
+				if (rootHex) {
+					const endorsementB64 = await passkey.ensureEndorsement(await userRoot.publicKeyXY());
+					await postUserRoot(session.sub!, session.token!, rootHex, {
+						sessionPublicKeyXY: sessionHex,
+						endorsementB64
+					});
+					return;
+				}
+			} catch {
+				// Fall through to the session-root shape. NOTE: on a fresh
+				// instance this pins the session key as ROOT, and a later
+				// passkey upgrade needs the identity-reset flow (ADR-0064
+				// consequences) — 4.3 moves creation behind an explicit gesture.
+			}
+		}
+		await postUserRoot(session.sub!, session.token!, sessionHex);
+	}
 
 	async function copyAddress() {
 		try {
@@ -67,7 +104,7 @@
 				// Register the root FIRST — it is the instance's first touch, so
 				// the DO pins it before grant-at-bind issues grant_user over it
 				// (a 409 here means this browser lost the pinned root: reset).
-				await postUserRoot(session.sub!, session.token!, await userRoot.publicKeyXYHex());
+				await registerUserRoot();
 				await chat.connect();
 				await proofs.refresh();
 			} catch {
@@ -87,6 +124,7 @@
 		void (async () => {
 			// Root first: a fresh wallet means a fresh DO instance, and the new
 			// instance must pin the NEW root, not resurface the old pair.
+			await passkey.reset();
 			await userRoot.reset();
 			wallet.reset();
 			session.clear();
