@@ -1,13 +1,16 @@
 <script lang="ts">
 	import type { ProofPanel } from '$lib/proofs.svelte.ts';
+	import { leasePhase, leaseRemainingLabel } from '$lib/lease.ts';
 	import { shortHex } from '$lib/utils.ts';
 	import Card from '$lib/components/ui/Card.svelte';
 	import Badge from '$lib/components/ui/Badge.svelte';
 	import Button from '$lib/components/ui/Button.svelte';
 	import WorkCard from './WorkCard.svelte';
 	import {
+		Clock,
 		Coins,
 		Download,
+		Fingerprint,
 		Gauge,
 		KeyRound,
 		LoaderCircle,
@@ -20,6 +23,14 @@
 	let { proofs }: { proofs: ProofPanel } = $props();
 
 	const receiptedCount = $derived(proofs.works.filter((w) => w.state === 'receipted').length);
+
+	// The lease countdown re-renders on a slow tick — it displays minutes, so
+	// 30s keeps it honest without busywork.
+	let now = $state(Date.now());
+	$effect(() => {
+		const timer = setInterval(() => (now = Date.now()), 30_000);
+		return () => clearInterval(timer);
+	});
 
 	// Deleting the local openings cannot be undone and cannot be re-fetched —
 	// the service never had them. Confirm, and say exactly what survives.
@@ -87,58 +98,153 @@
 	{#if proofs.export?.attestationMode === 'separate'}
 		{@const sealingReady = proofs.userLogId !== null}
 		{@const activated = proofs.sealingDelegated}
+		{@const lease = activated ? leasePhase(proofs.sealingLeaseExpiresAt, now) : 'unknown'}
+		{@const leaseUrgent = lease === 'expiring' || lease === 'expired'}
 		<Card title="Activate your log">
 			<div class="space-y-2 p-4 text-xs">
-				<p class="text-kumo-subtle">
-					Your signed inputs land as their own leaves on a log <em
-						>owned by a key only this browser holds</em
-					>. Only that key can authorize the lane's sealer to checkpoint it — done here, in the
-					browser; the agent never holds your key. Until then your leaves are held, unregistered.
-				</p>
-				<div class="flex items-center gap-2">
-					<Button
-						size="sm"
-						variant={sealingReady && !activated ? 'primary' : 'secondary'}
-						disabled={!sealingReady || proofs.delegation === 'working'}
-						title={sealingReady
-							? "Sign a sealing delegation for your log with your browser's root key"
-							: 'Your log is being created — a moment'}
-						onclick={() => proofs.delegateUserSealing()}
-					>
-						{#if proofs.delegation === 'working'}
-							<LoaderCircle class="size-3.5 animate-spin" />
-						{:else}
-							<Stamp class="size-3.5" />
-						{/if}
-						{activated ? 'Renew sealing lease' : 'Authorize sealing'}
-					</Button>
-					{#if activated}
-						<Badge tone="success"><KeyRound class="size-3" /> delegated</Badge>
-					{:else if sealingReady}
-						<Badge tone="warning">activate before chatting</Badge>
+				{#if proofs.onboarding === 'needs-activation'}
+					<!-- 4.3: the custody choice. Nothing is pinned and no grant is
+					     requested until one of these two explicit gestures. -->
+					<p class="text-kumo-subtle">
+						Your inputs land as their own leaves on a log <em>owned by a key of your choosing</em>.
+						A <strong>passkey</strong> (Touch&nbsp;ID / your platform authenticator) keeps that root key
+						in hardware: it signs only the big ceremonies, each one a prompt you approve, and it can never
+						be exfiltrated by this page. Without one, the root is a software key this browser holds.
+					</p>
+					<div class="flex flex-wrap items-center gap-2">
+						<Button
+							size="sm"
+							variant="primary"
+							disabled={proofs.activating}
+							title="Create a passkey as your log's root key, then endorse this browser's signing key with it — two prompts"
+							onclick={() => proofs.activateWithPasskey()}
+						>
+							{#if proofs.activating}
+								<LoaderCircle class="size-3.5 animate-spin" />
+							{:else}
+								<Fingerprint class="size-3.5" />
+							{/if}
+							Create a passkey & activate
+						</Button>
+						<Button
+							size="sm"
+							variant="ghost"
+							disabled={proofs.activating}
+							title="Root the log in this browser's software key instead (one-way: switching to a passkey later means resetting your identity)"
+							onclick={() => proofs.continueWithoutPasskey()}
+						>
+							Continue without a passkey
+						</Button>
+					</div>
+					<p class="text-kumo-subtle">
+						Two prompts now — create the passkey, then endorse this browser's per-turn signing key
+						(one gesture, ever). Continuing without one is one-way: upgrading to a passkey later
+						means resetting your identity and starting a fresh log.
+					</p>
+					{#if proofs.onboardingDetail}
+						<p class="text-kumo-danger">{proofs.onboardingDetail}</p>
 					{/if}
-				</div>
-				{#if !sealingReady && proofs.userGrantError}
-					<!-- Do NOT fall through to "being created" here: nothing is in
-					     flight, and waiting will not help. The DO retries on a
-					     cooldown, so say what broke and that it is coming back
-					     (plan-2608-11 W4). -->
+				{:else if proofs.onboarding === 'reset-required'}
 					<p class="text-kumo-danger">
-						Your log could not be created: {proofs.userGrantError}
+						{proofs.onboardingDetail ?? 'this log is rooted by a key this browser no longer holds'}
 					</p>
 					<p class="text-kumo-subtle">
-						Retrying automatically. You can chat meanwhile; your leaves are held until you
-						authorize.
+						Use the reset button in the header to forget this identity and start a fresh log.
 					</p>
-				{:else if !sealingReady}
+				{:else}
 					<p class="text-kumo-subtle">
-						Your log is being created (it needs a grant from the authority — up to a minute). You
-						can chat meanwhile; your leaves are held until you authorize.
+						Your signed inputs land as their own leaves on a log <em
+							>owned by {proofs.custody === 'passkey'
+								? 'your passkey — a key that never leaves your authenticator'
+								: 'a key only this browser holds'}</em
+						>. Only that key can authorize the lane's sealer to checkpoint it — done here, in the
+						browser; the agent never holds your key. Until then your leaves are held, unregistered.
 					</p>
-				{:else if proofs.delegationDetail}
-					<p class={proofs.delegation === 'error' ? 'text-kumo-danger' : 'text-kumo-subtle'}>
-						{proofs.delegationDetail}
-					</p>
+					<div class="flex items-center gap-2">
+						<Button
+							size="sm"
+							variant={sealingReady && (!activated || leaseUrgent) ? 'primary' : 'secondary'}
+							disabled={!sealingReady || proofs.delegation === 'working'}
+							title={!sealingReady
+								? 'Your log is being created — a moment'
+								: proofs.custody === 'passkey'
+									? 'Sign a sealing delegation with your passkey — two prompts, one per artifact'
+									: "Sign a sealing delegation for your log with your browser's root key"}
+							onclick={() => proofs.delegateUserSealing()}
+						>
+							{#if proofs.delegation === 'working'}
+								<LoaderCircle class="size-3.5 animate-spin" />
+							{:else}
+								<Stamp class="size-3.5" />
+							{/if}
+							{activated ? 'Renew sealing lease' : 'Authorize sealing'}
+						</Button>
+						{#if activated}
+							<Badge tone="success"><KeyRound class="size-3" /> delegated</Badge>
+						{:else if sealingReady}
+							<Badge tone="warning">activate before chatting</Badge>
+						{/if}
+					</div>
+					{#if !sealingReady && proofs.userGrantError}
+						<!-- Do NOT fall through to "being created" here: nothing is in
+						     flight, and waiting will not help. The DO retries on a
+						     cooldown, so say what broke and that it is coming back
+						     (plan-2608-11 W4). -->
+						<p class="text-kumo-danger">
+							Your log could not be created: {proofs.userGrantError}
+						</p>
+						<p class="text-kumo-subtle">
+							Retrying automatically. You can chat meanwhile; your leaves are held until you
+							authorize.
+						</p>
+					{:else if !sealingReady}
+						<p class="text-kumo-subtle">
+							Your log is being created (it needs a grant from the authority — up to a minute). You
+							can chat meanwhile; your leaves are held until you authorize.
+						</p>
+					{:else if proofs.delegationDetail}
+						<p class={proofs.delegation === 'error' ? 'text-kumo-danger' : 'text-kumo-subtle'}>
+							{proofs.delegationDetail}
+						</p>
+					{/if}
+
+					<!-- The sealing authorization is a LEASE (~6h on this lane), by
+					     design — surface the countdown and the re-ceremony rather
+					     than letting receipts silently stall at expiry (4.3). -->
+					{#if activated}
+						<div class="flex flex-wrap items-center gap-2 border-t border-kumo-line pt-2">
+							<Clock class="size-3.5 text-kumo-subtle" />
+							{#if proofs.sealingLeaseExpiresAt === null}
+								<span class="text-kumo-subtle">
+									sealing is delegated as a time-boxed lease (~6h) — its expiry was not recorded;
+									renew if receipts stall
+								</span>
+							{:else if lease === 'expired'}
+								<Badge tone="danger">lease expired</Badge>
+								<span class="text-kumo-danger">
+									new leaves wait until you renew{proofs.custody === 'passkey'
+										? ' — a two-prompt passkey ceremony'
+										: ''}
+								</span>
+							{:else if lease === 'expiring'}
+								<Badge tone="warning">
+									expires in {leaseRemainingLabel(proofs.sealingLeaseExpiresAt, now)}
+								</Badge>
+								<span class="text-kumo-subtle">
+									renew soon{proofs.custody === 'passkey' ? ' — a two-prompt passkey ceremony' : ''}
+								</span>
+							{:else}
+								<span class="text-kumo-default">
+									sealing lease: {leaseRemainingLabel(proofs.sealingLeaseExpiresAt, now)} left
+								</span>
+								<span class="text-kumo-subtle">
+									— renewal is deliberate{proofs.custody === 'passkey'
+										? ': two passkey prompts, roughly every 6 hours'
+										: ', roughly every 6 hours'}
+								</span>
+							{/if}
+						</div>
+					{/if}
 				{/if}
 
 				<!-- Prepaid turns (W4c/W4d): the purchased batch is the turn budget;

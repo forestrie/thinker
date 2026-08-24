@@ -12,12 +12,15 @@
  * topology — never by an operator bypass token (canopy C7/C10).
  *
  *   POST /grants/agent {publicKeyXY}  grantData = 64-byte ES256 x‖y (agent kid)
- *   POST /grants/user  {address, publicKeyXY?}
+ *   POST /grants/user  {address, publicKeyXY?, requiresUserVerification?}
  *                                     grantData = the 64-byte ES256 browser
  *                                     root when publicKeyXY is given (Phase
  *                                     4a), else the 20-byte KS256 wallet
  *                                     address (legacy); address is always the
- *                                     subject / payment identity
+ *                                     subject / payment identity.
+ *                                     requiresUserVerification stamps
+ *                                     GF_REQUIRES_USER_VERIFICATION (4.4, Q3)
+ *                                     — passkey-rooted (ES256) logs only
  *   GET  /healthz                     liveness + the log ids it is wired to
  *
  * ## Deployment posture
@@ -220,6 +223,18 @@ async function handleUserGrant(
 			);
 	}
 
+	// Q3 / plan-2608-13 4.4: GF_REQUIRES_USER_VERIFICATION on the user grant.
+	// Only coherent over an ES256 root whose delegations are WebAuthn
+	// ceremonies (passkey custody): a wallet-address log delegates via KS256,
+	// which can never present UV, and the contract would reject every
+	// checkpoint fail-closed — refuse to mint that grant at all.
+	const requiresUserVerification = body.requiresUserVerification === true;
+	if (requiresUserVerification && !rootXYHex)
+		return Response.json(
+			{ error: 'requiresUserVerification needs an ES256 publicKeyXY root (passkey custody)' },
+			{ status: 400 }
+		);
+
 	const { userAuthority, batchTurns } = config(env);
 	const { issue, lease } = await contexts(env);
 
@@ -253,7 +268,8 @@ async function handleUserGrant(
 			subject,
 			grantData,
 			batchTurns,
-			xPayment
+			xPayment,
+			requiresUserVerification
 		);
 	} catch (err) {
 		if (err instanceof PaymentRequired)
@@ -278,11 +294,12 @@ async function handleUserGrant(
 		logId: issued.logId,
 		grantB64: issued.grantB64,
 		maxHeight: issued.maxHeight,
-		...(rootXYHex ? { publicKeyXY: rootXYHex } : {})
+		...(rootXYHex ? { publicKeyXY: rootXYHex } : {}),
+		...(requiresUserVerification ? { requiresUserVerification: true } : {})
 	};
 	await issue.store.putIssued(record);
 	console.log(
-		`issued grant_user addr=${subject} root=${rootXYHex ? `es256 ${rootXYHex.slice(0, 16)}…` : 'ks256 address'} log=${issued.logId}${xPayment ? ' (x402 paid)' : ''}`
+		`issued grant_user addr=${subject} root=${rootXYHex ? `es256 ${rootXYHex.slice(0, 16)}…` : 'ks256 address'}${requiresUserVerification ? ' +uv' : ''} log=${issued.logId}${xPayment ? ' (x402 paid)' : ''}`
 	);
 	return Response.json({ ...record, address: subject, preIssued: false }, { status: 201 });
 }

@@ -30,6 +30,13 @@ export interface IssuedGrant {
 	 * requested shape matches — a changed root is a NEW log.
 	 */
 	publicKeyXY?: string;
+	/**
+	 * The grant carries GF_REQUIRES_USER_VERIFICATION (plan-2608-13 4.4, Q3):
+	 * passkey-rooted logs only. Recorded for observability; a cached grant is
+	 * still served on a UV-policy mismatch (unlike a root-shape mismatch it
+	 * remains usable, and re-issuing would burn a payment on a paid lane).
+	 */
+	requiresUserVerification?: boolean;
 }
 
 /**

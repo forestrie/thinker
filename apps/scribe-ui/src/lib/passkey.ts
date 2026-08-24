@@ -44,25 +44,36 @@ export class PasskeyRoot {
 	}
 
 	/**
-	 * Load-or-create, single-flight. Creation is a user gesture (the
-	 * onboarding ceremony); a null return means the authenticator refused or
-	 * produced a non-P-256 credential — callers fall back to 4a.
+	 * Load the stored record — NEVER creates. Creation costs a user gesture
+	 * and pins a custody shape, so it happens only through {@link create},
+	 * behind the explicit "Activate your log" click (4.3): the pre-4.3
+	 * load-or-create here is what silently pinned session roots on browsers
+	 * that refused a page-load `credentials.create()`.
 	 */
 	async ensure(): Promise<PasskeyRecord | null> {
 		if (this.#record) return this.#record;
-		this.#loading ??= this.#load().finally(() => {
-			this.#loading = null;
-		});
+		this.#loading ??= idbGet()
+			.then((record) => (this.#record = record))
+			.finally(() => {
+				this.#loading = null;
+			});
 		return this.#loading;
 	}
 
-	async #load(): Promise<PasskeyRecord | null> {
-		let record = await idbGet();
-		if (!record) {
-			record = await createPasskey();
-			if (record) await idbPut(record);
+	/**
+	 * Load-or-create — THE onboarding gesture (4.3). Must be called from a
+	 * user activation (browsers refuse `credentials.create()` without one).
+	 * A null return means the authenticator refused or produced a non-P-256
+	 * credential — the caller offers the 4a fallback rather than taking it.
+	 */
+	async create(): Promise<PasskeyRecord | null> {
+		const existing = await this.ensure();
+		if (existing) return existing;
+		const record = await createPasskey();
+		if (record) {
+			await idbPut(record);
+			this.#record = record;
 		}
-		this.#record = record;
 		return record;
 	}
 
@@ -72,13 +83,12 @@ export class PasskeyRoot {
 	}
 
 	/**
-	 * The stored root, WITHOUT ever prompting a creation gesture — the probe
-	 * for "is this browser under passkey custody?" (verify paths, delegation
-	 * dispatch). Null until onboarding has run.
+	 * The stored root — the probe for "is this browser under passkey
+	 * custody?" (verify paths, delegation dispatch, the 4.3 boot decision).
+	 * Null until the activation ceremony has run.
 	 */
 	async currentPublicKeyXY(): Promise<Uint8Array | null> {
-		if (!this.#record) this.#record = await idbGet();
-		return this.#record?.publicKeyXY ?? null;
+		return (await this.ensure())?.publicKeyXY ?? null;
 	}
 
 	/**

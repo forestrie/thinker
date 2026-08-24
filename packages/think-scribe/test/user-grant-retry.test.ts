@@ -17,6 +17,7 @@ const STUCK: UserGrantRetryState = {
 	authorityReachable: true,
 	hasGrant: false,
 	hasParkedChallenge: false,
+	custodyPending: false,
 	lastAttemptAt: null,
 	now: 1_000_000
 };
@@ -78,6 +79,25 @@ describe('the cooldown', () => {
 	// deadlock this module exists to fix.
 	it('treats a future timestamp as cooldown-elapsed rather than wedging', () => {
 		expect(shouldRetryUserGrant({ ...STUCK, lastAttemptAt: STUCK.now + 60_000 })).toBe(true);
+	});
+});
+
+describe('a pending custody choice is not our move either', () => {
+	// The browser declared it may still create a passkey (plan-2608-13 4.3).
+	// Issuing now would mint a wallet-address grant whose grantData the
+	// activation ceremony can never re-root; the root pin re-kicks acquisition.
+	it('does not acquire while the custody choice is pending', () => {
+		expect(shouldRetryUserGrant({ ...STUCK, custodyPending: true })).toBe(false);
+	});
+
+	it('still declines even after the cooldown', () => {
+		expect(
+			shouldRetryUserGrant({
+				...STUCK,
+				custodyPending: true,
+				lastAttemptAt: STUCK.now - 10 * USER_GRANT_RETRY_COOLDOWN_MS
+			})
+		).toBe(false);
 	});
 });
 

@@ -7,7 +7,18 @@
 	import Composer from './Composer.svelte';
 	import { LoaderCircle } from '@lucide/svelte';
 
-	let { chat }: { chat: ScribeChat } = $props();
+	let {
+		chat,
+		lockNotice = null
+	}: {
+		chat: ScribeChat;
+		/**
+		 * Non-null locks the composer with this explanation (4.3): before a
+		 * log root is registered, turn admission has nothing to verify a
+		 * signed envelope against, so sending would only fail server-side.
+		 */
+		lockNotice?: string | null;
+	} = $props();
 
 	let scroller = $state<HTMLDivElement | null>(null);
 
@@ -85,5 +96,11 @@
 		{/if}
 	</div>
 
-	<Composer disabled={chat.connection !== 'connected' || chat.awaiting} {onsend} />
+	{#if lockNotice}
+		<p class="border-t border-kumo-line px-4 py-2 text-xs text-kumo-subtle">{lockNotice}</p>
+	{/if}
+	<Composer
+		disabled={chat.connection !== 'connected' || chat.awaiting || lockNotice !== null}
+		{onsend}
+	/>
 </Card>

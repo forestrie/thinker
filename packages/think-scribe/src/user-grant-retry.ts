@@ -26,6 +26,13 @@ export interface UserGrantRetryState {
 	hasGrant: boolean;
 	/** An x402 challenge is parked, awaiting the browser wallet's signature. */
 	hasParkedChallenge: boolean;
+	/**
+	 * The browser declared its custody choice pending and no root is pinned
+	 * yet (plan-2608-13 4.3): it may create a passkey, and the grant's
+	 * grantData must be whichever root it settles on. Issuing now would mint
+	 * a wallet-address grant the activation can never re-root.
+	 */
+	custodyPending: boolean;
 	/** When the last acquisition was attempted (epoch ms), or null if never. */
 	lastAttemptAt: number | null;
 	/** Now, epoch ms. */
@@ -43,6 +50,11 @@ export function shouldRetryUserGrant(state: UserGrantRetryState): boolean {
 	// wallet has to sign. Re-asking would leave a second registration in
 	// flight against the same subject (plan-2608-11 D3).
 	if (state.hasParkedChallenge) return false;
+
+	// Also not our move: the browser is still choosing its custody shape
+	// (passkey vs session root, plan-2608-13 4.3). The root pin re-kicks
+	// acquisition the moment the choice lands.
+	if (state.custodyPending) return false;
 
 	// Every HTTP route passes through the principal check and the UI polls
 	// /receipts every ~7s, so an uncooled retry would hit the authority — which

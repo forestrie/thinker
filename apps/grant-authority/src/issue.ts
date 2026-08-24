@@ -23,7 +23,8 @@ import {
 	bytesToForestrieGrantBase64,
 	dataLogCreateExtendFlags,
 	HEADER_IDTIMESTAMP,
-	HEADER_RECEIPT
+	HEADER_RECEIPT,
+	withRequiresUserVerification
 } from '@forestrie/grant-builder';
 import {
 	encodeCborDeterministic,
@@ -82,6 +83,10 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
  * Build and sign a creation grant endorsing `grantData` on a fresh data log
  * owned by `authority`. `maxHeight > 0` sizes the grant to a purchased batch
  * (user grants, W4a); 0 leaves it unbounded (agent grants).
+ * `requiresUserVerification` stamps GF_REQUIRES_USER_VERIFICATION (univocity
+ * bit 40, wire byte 2 mask 0x01) — per-log policy, never a constant (Q3/R1):
+ * only for a log whose delegations are WebAuthn ceremonies, since the
+ * contract rejects the flag under any alg that cannot honour UV.
  *
  * Signing is cheap and stateless — the expensive register/seal is separate, so
  * a resume never re-signs.
@@ -90,13 +95,15 @@ export async function buildCreationGrant(
 	authority: IssuanceAuthority,
 	grantData: Uint8Array,
 	maxHeight: number,
-	privateKey: CryptoKey
+	privateKey: CryptoKey,
+	requiresUserVerification = false
 ): Promise<{ logId: string; sign1: Uint8Array; grantBase64: string }> {
 	const logId = crypto.randomUUID();
+	const flags = dataLogCreateExtendFlags();
 	const payloadBytes = encodeGrantPayloadV0Canonical({
 		logId: uuidToBytes(logId),
 		ownerLogId: uuidToBytes(authority.logId),
-		grant: dataLogCreateExtendFlags(),
+		grant: requiresUserVerification ? withRequiresUserVerification(flags) : flags,
 		maxHeight,
 		minGrowth: 0,
 		grantData
@@ -235,7 +242,8 @@ export async function issueCreationGrant(
 	subject: string,
 	grantData: Uint8Array,
 	maxHeight: number,
-	xPayment?: string
+	xPayment?: string,
+	requiresUserVerification = false
 ): Promise<{ logId: string; grantB64: string; maxHeight: number }> {
 	const startedAt = Date.now();
 	const deadline = startedAt + DEADLINE_MS;
@@ -246,7 +254,13 @@ export async function issueCreationGrant(
 	if (resumed) {
 		inFlight = resumed;
 	} else {
-		const built = await buildCreationGrant(authority, grantData, maxHeight, ctx.privateKey);
+		const built = await buildCreationGrant(
+			authority,
+			grantData,
+			maxHeight,
+			ctx.privateKey,
+			requiresUserVerification
+		);
 		const submitted = await registerGrantRaw(ctx, authority, built.grantBase64, xPayment);
 		if (submitted.status === 'payment_required') throw new PaymentRequired(submitted.challengeB64);
 

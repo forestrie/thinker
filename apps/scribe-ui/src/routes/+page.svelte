@@ -3,7 +3,6 @@
 	import { DemoWallet } from '$lib/wallet.svelte.ts';
 	import { UserRootKey } from '$lib/user-root.ts';
 	import { PasskeyRoot } from '$lib/passkey.ts';
-	import { postUserRoot } from '$lib/scribe-api.ts';
 	import { ScribeSession } from '$lib/session.svelte.ts';
 	import { ScribeChat } from '$lib/chat.svelte.ts';
 	import { ProofPanel as ProofPanelState } from '$lib/proofs.svelte.ts';
@@ -47,35 +46,23 @@
 	let balanceError = $state<string | null>(null);
 	const payment = $derived(paymentFromChallenge(proofs.grantChallenge));
 
-	/**
-	 * Onboard the user's log root (4.1, ADR-0064). Passkey path: create (or
-	 * load) the passkey, endorse the session key (one gesture, cached after),
-	 * post root + session + endorsement. Any refusal — no authenticator, a
-	 * cancelled gesture, a legacy instance whose pinned root is the session
-	 * key (409) — falls back to the 4a shape, which stands unchanged (Q4).
-	 */
-	async function registerUserRoot(): Promise<void> {
-		const sessionHex = await userRoot.publicKeyXYHex();
-		if (PasskeyRoot.supported()) {
-			try {
-				const rootHex = await passkey.publicKeyXYHex();
-				if (rootHex) {
-					const endorsementB64 = await passkey.ensureEndorsement(await userRoot.publicKeyXY());
-					await postUserRoot(session.sub!, session.token!, rootHex, {
-						sessionPublicKeyXY: sessionHex,
-						endorsementB64
-					});
-					return;
-				}
-			} catch {
-				// Fall through to the session-root shape. NOTE: on a fresh
-				// instance this pins the session key as ROOT, and a later
-				// passkey upgrade needs the identity-reset flow (ADR-0064
-				// consequences) — 4.3 moves creation behind an explicit gesture.
-			}
+	// Chat is locked until a log root is registered (4.3): turn admission
+	// verifies the signed envelope against the pinned root, so before the
+	// custody choice lands there is nothing a turn could be admitted against.
+	const chatLock = $derived.by(() => {
+		switch (proofs.onboarding) {
+			case 'registered':
+				return null;
+			case 'needs-activation':
+				return 'Activate your log in the proof panel before chatting — your turns are signed against the key you choose there.';
+			case 'reset-required':
+				return proofs.onboardingDetail ?? 'reset your identity to continue';
+			case 'error':
+				return `log root registration failed: ${proofs.onboardingDetail ?? 'unknown error'}`;
+			default:
+				return 'preparing your log root…';
 		}
-		await postUserRoot(session.sub!, session.token!, sessionHex);
-	}
+	});
 
 	async function copyAddress() {
 		try {
@@ -101,10 +88,11 @@
 		void (async () => {
 			try {
 				await session.ensure();
-				// Register the root FIRST — it is the instance's first touch, so
-				// the DO pins it before grant-at-bind issues grant_user over it
-				// (a 409 here means this browser lost the pinned root: reset).
-				await registerUserRoot();
+				// Register (or defer) the root FIRST — it is the instance's first
+				// touch, so grant-at-bind either sees the pinned root or sees the
+				// custody-pending declaration and waits (4.3). Only then may any
+				// other route bind the principal.
+				await proofs.registerRoot();
 				await chat.connect();
 				await proofs.refresh();
 			} catch {
@@ -193,7 +181,7 @@
 	<main
 		class="grid min-h-0 flex-1 grid-cols-1 gap-3 overflow-y-auto p-3 lg:grid-cols-[minmax(0,1fr)_420px] lg:overflow-hidden"
 	>
-		<ChatPanel {chat} />
+		<ChatPanel {chat} lockNotice={chatLock} />
 		<ProofPanel {proofs} />
 	</main>
 </div>
