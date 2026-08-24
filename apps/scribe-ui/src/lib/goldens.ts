@@ -18,7 +18,6 @@
  */
 import {
 	delegateSealingWebauthn,
-	type WebauthnAssertionResult,
 	type SignWebauthnAssertion
 } from '@forestrie/think-scribe/forestrie/delegate';
 import {
@@ -273,8 +272,7 @@ export async function captureGolden(identity: CaptureIdentity): Promise<GoldenCa
 	);
 	if (submitted.length !== 1) throw new Error('ceremony did not submit exactly once');
 	const body = submitted[0]!;
-	const b64ToBytes = (b64: string) =>
-		Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+	const b64ToBytes = (b64: string) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
 
 	const rootX = identity.rootPublicKeyXY.slice(0, 32);
 	const rootY = identity.rootPublicKeyXY.slice(32, 64);

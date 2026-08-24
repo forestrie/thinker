@@ -66,12 +66,10 @@
 	{:else}
 		<p class="opacity-80">
 			Captures a real-authenticator delegation golden via the REAL
-			<code>delegateSealingWebauthn</code> ceremony (mock coordinator, fixed
-			fixture scope). Two authenticator prompts: the certificate's envelope
-			assertion, then the on-chain proof's assertion. The credential is a
-			throwaway — it never touches the scribe's own custody record. Both
-			artifacts are verified through the contract mirrors before download is
-			offered.
+			<code>delegateSealingWebauthn</code> ceremony (mock coordinator, fixed fixture scope). Two authenticator
+			prompts: the certificate's envelope assertion, then the on-chain proof's assertion. The credential
+			is a throwaway — it never touches the scribe's own custody record. Both artifacts are verified through
+			the contract mirrors before download is offered.
 		</p>
 
 		<div class="space-y-2">
@@ -83,7 +81,10 @@
 				1 · Create throwaway capture passkey
 			</button>
 			{#if identity}
-				<div>root x‖y: <code>{identity.rootPublicKeyXY.length} bytes ok</code> · rpId: <code>{identity.rpId}</code></div>
+				<div>
+					root x‖y: <code>{identity.rootPublicKeyXY.length} bytes ok</code> · rpId:
+					<code>{identity.rpId}</code>
+				</div>
 			{/if}
 		</div>
 

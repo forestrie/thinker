@@ -78,9 +78,7 @@ describe('captureGolden (5.1 harness)', () => {
 		);
 		expect(onchainClient).toContain(`"challenge":"${golden.onchain.challengeB64u}"`);
 		const certClient = new TextDecoder().decode(
-			Uint8Array.from(
-				golden.certificate.clientDataJSON.match(/../g)!.map((h) => parseInt(h, 16))
-			)
+			Uint8Array.from(golden.certificate.clientDataJSON.match(/../g)!.map((h) => parseInt(h, 16)))
 		);
 		expect(certClient).toContain(`"challenge":"${golden.certificate.challengeB64u}"`);
 
