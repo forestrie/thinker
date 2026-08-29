@@ -248,6 +248,12 @@ set_var MODEL_ID claude-haiku-4-5
 set_var DEMO_DAILY_TURN_CAP "${DEMO_DAILY_TURN_CAP:-500}"
 set_var DEMO_USER_DAILY_TURN_CAP "${DEMO_USER_DAILY_TURN_CAP:-50}"
 
+# DEMO_GATE is deliberately ABSENT here. `off` opens the demo gate and makes the
+# environment public, which is an operator decision about a specific
+# environment at a specific moment — not a property of a synced baseline. Set
+# it by hand (`gh variable set DEMO_GATE --env <env> --body off`) and delete it
+# by hand. This script only ever sets, so a hand-set value survives a re-sync.
+
 # deploy.yml's kill switch. Off for stage by default — see the warning above.
 if [ "$ENVIRONMENT" = stage ]; then
 	set_var ENABLE_DEPLOY "${ENABLE_DEPLOY:-false}"

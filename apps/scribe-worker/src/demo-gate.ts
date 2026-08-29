@@ -43,9 +43,12 @@
  * unrecognised-value case must fail CLOSED, because this sits in front of an
  * endpoint that spends Anthropic tokens.
  *
- * `DEMO_GATE` is deliberately NOT on `deploy.yml`'s `--var` allowlist, so it
- * cannot reach a deployed Worker; the preflight also rejects it explicitly.
- * Deployed environments must set `DEMO_PASSWORD` — the preflight requires it.
+ * `DEMO_GATE` reaches a deployed Worker too, but only as an explicit act: it is
+ * on `deploy.yml`'s `--var` allowlist, the preflight accepts no value but `off`
+ * and warns when it sees one, and smoke then asserts the deployed origin really
+ * does answer unauthenticated. Deployed environments must still set
+ * `DEMO_PASSWORD` — the preflight requires it, so closing the gate again is a
+ * variable away and never a secret rotation.
  */
 import { verifySession, type AuthEnv } from './auth.ts';
 
@@ -53,8 +56,10 @@ export interface DemoGateEnv extends AuthEnv {
 	/** The shared demo password. Unset = gate open (local dev only). */
 	DEMO_PASSWORD?: string;
 	/**
-	 * `off` disables the gate outright, even when DEMO_PASSWORD is set. Local
-	 * dev and integration tests only — never set in a deployed environment.
+	 * `off` disables the gate outright, even when DEMO_PASSWORD is set — for
+	 * local dev, integration tests, and a deployed environment deliberately
+	 * opened to the public. Setting it deployed means anyone with the URL can
+	 * spend tokens; the daily caps are then the only bound.
 	 */
 	DEMO_GATE?: string;
 }

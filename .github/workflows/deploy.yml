@@ -6,7 +6,7 @@
 # ## Topology it deploys
 #
 #   thinker-<env>                  scribe worker  — THE SINGLE PUBLIC ORIGIN
-#     ├── Basic-auth demo gate (DEMO_PASSWORD)
+#     ├── Basic-auth demo gate (DEMO_PASSWORD, unless DEMO_GATE=off)
 #     ├── /agents/* native WebSocket to the Scribe DO (never proxied)
 #     ├── [binding] UI        -> thinker-ui-<env>              workers_dev:false
 #     └── [binding] AUTHORITY -> thinker-grant-authority-<env> workers_dev:false
@@ -20,6 +20,23 @@
 # there is one provisioned forest, so a stage deploy would share dev's root log,
 # authority logs and authority key. Flipping it to true without a second
 # provision.sh run is a mistake, not a shortcut.
+#
+# ## Opening the demo gate on a deployed environment
+#
+# Set the environment variable `DEMO_GATE=off`. That is the ONLY value accepted
+# — preflight rejects anything else, and the Worker itself fails closed on an
+# unrecognised value, so a typo costs a 401 rather than an open door.
+#
+# It makes the environment PUBLIC: anyone with the URL can spend Anthropic
+# tokens on it. What bounds the damage is DEMO_DAILY_TURN_CAP /
+# DEMO_USER_DAILY_TURN_CAP and the Anthropic workspace spend limit — satisfy
+# yourself those are set to something you are willing to lose before setting it.
+# Unset the variable and redeploy to close the gate again; DEMO_PASSWORD stays
+# configured either way, so closing it needs no secret rotation.
+#
+# Smoke follows the variable rather than assuming: with it set it asserts `/`
+# answers 200 with NO credentials, and without it that `/` answers 401. Either
+# way the deploy proves the gate is in the state that was configured.
 name: Deploy
 
 on:
@@ -107,13 +124,19 @@ jobs:
           fail=0
           note() { echo "::error::$*"; fail=1; }
 
-          # DEMO_GATE=off is the LOCAL/integration-test switch that opens the
-          # demo gate outright. It is not on the --var allowlist below, so it
-          # cannot reach a deployed Worker today — this rejects it at the door
-          # anyway, so that adding it to that allowlist later is a loud mistake
-          # rather than a silently public, token-spending endpoint.
-          if [ -n "$VAR_DEMO_GATE" ]; then
-            note "variable DEMO_GATE is set in environment '${{ inputs.environment }}' — it is a local-only gate override and must never be set for a deployed environment"
+          # DEMO_GATE opens the demo gate outright, making this environment
+          # public and its token spend anyone's to make. Deliberately setting it
+          # is allowed — see the header — but ONLY as the exact string `off`.
+          # Any other value is rejected here rather than deployed: the Worker
+          # fails closed on an unrecognised value, so `DEMO_GATE=0` would ship a
+          # gate the operator believes is open, and the smoke assertion below
+          # would then be checking the wrong half of the branch.
+          case "$VAR_DEMO_GATE" in
+            '' | off) : ;;
+            *) note "variable DEMO_GATE is '$VAR_DEMO_GATE' in environment '${{ inputs.environment }}' — the only accepted value is 'off' (unset it to keep the gate closed)" ;;
+          esac
+          if [ "$VAR_DEMO_GATE" = off ]; then
+            echo "::warning::DEMO_GATE=off — '${{ inputs.environment }}' will be PUBLIC and its Anthropic spend is bounded only by the daily turn caps and the workspace limit"
           fi
 
           for name in ANTHROPIC_API_KEY CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID \
@@ -316,8 +339,18 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          VAR_DEMO_GATE: ${{ vars.DEMO_GATE }}
         run: |
+          # DEMO_GATE is the one --var that is conditional. Passing it always
+          # would send `--var DEMO_GATE:` when the variable is unset, and an
+          # empty string is not the same as absent to a reader of the deployed
+          # config — the gate is closed either way, but "the var is not there"
+          # is the state the closed case should be in. Preflight has already
+          # rejected every value but `off`.
+          gate=()
+          [ -z "$VAR_DEMO_GATE" ] || gate=(--var "DEMO_GATE:$VAR_DEMO_GATE")
           pnpm exec wrangler deploy --env ${{ inputs.environment }} \
+            "${gate[@]}" \
             --var FORESTRIE_BASE_URL:'${{ vars.FORESTRIE_BASE_URL }}' \
             --var FORESTRIE_ROOT_LOG_ID:'${{ vars.FORESTRIE_ROOT_LOG_ID }}' \
             --var FORESTRIE_ROOT_PUBLIC_KEY_XY:'${{ vars.FORESTRIE_ROOT_PUBLIC_KEY_XY }}' \
@@ -345,13 +378,27 @@ jobs:
       URL: https://thinker-${{ inputs.environment }}.${{ vars.WORKERS_DEV_ZONE }}
       ZONE: ${{ vars.WORKERS_DEV_ZONE }}
       DEMO_PASSWORD: ${{ secrets.DEMO_PASSWORD }}
+      DEMO_GATE: ${{ vars.DEMO_GATE }}
     steps:
-      - name: The demo gate is closed
+      # Asserts the gate is in the state that was CONFIGURED, in both
+      # directions. An unconditional "expect 401" would be the wrong assertion
+      # for an environment deliberately opened, and an unconditional "expect
+      # 200" would never notice a gate that failed to come up — so the branch
+      # reads the same variable the deploy did.
+      - name: The demo gate is in its configured state
         run: |
           code=$(curl -s -o /dev/null -w '%{http_code}' "$URL/")
-          [ "$code" = 401 ] || { echo "::error::expected 401 from $URL/, got $code"; exit 1; }
-          echo "gate closed: 401"
+          if [ "$DEMO_GATE" = off ]; then
+            [ "$code" = 200 ] || { echo "::error::DEMO_GATE=off, so $URL/ must answer 200 with no credentials — got $code"; exit 1; }
+            echo "gate open by intent (DEMO_GATE=off): 200 unauthenticated"
+          else
+            [ "$code" = 401 ] || { echo "::error::expected 401 from $URL/, got $code"; exit 1; }
+            echo "gate closed: 401"
+          fi
 
+      # Holds in both states: with the gate up this is the credential working,
+      # with it off the header is simply ignored. It is the rest of the smoke
+      # suite's precondition either way, so it is not skipped when open.
       - name: The demo gate opens with the password
         run: |
           code=$(curl -s -o /dev/null -w '%{http_code}' -u "demo:$DEMO_PASSWORD" "$URL/")
@@ -429,6 +476,14 @@ jobs:
             echo "- Front door: $URL"
             echo "- Model: \`${{ vars.MODEL_ID }}\`  Attestation: \`${{ vars.ATTESTATION_MODE }}\`"
             echo ""
-            echo "The URL is password gated. Do not share it until Phase C (spend caps)"
-            echo "and Phase D (privacy) have landed."
+            if [ "$DEMO_GATE" = off ]; then
+              echo "**The demo gate is OFF — this URL is public.** Anyone who has it can"
+              echo "spend Anthropic tokens, bounded only by the daily turn caps"
+              echo "(\`${{ vars.DEMO_DAILY_TURN_CAP }}\` global / \`${{ vars.DEMO_USER_DAILY_TURN_CAP }}\` per user) and the"
+              echo "workspace spend limit. Unset the \`DEMO_GATE\` variable and redeploy to"
+              echo "close it again."
+            else
+              echo "The URL is password gated. Do not share it until Phase C (spend caps)"
+              echo "and Phase D (privacy) have landed."
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
