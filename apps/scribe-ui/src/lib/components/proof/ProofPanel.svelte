@@ -6,7 +6,7 @@
 	import Card from '$lib/components/ui/Card.svelte';
 	import Badge from '$lib/components/ui/Badge.svelte';
 	import Button from '$lib/components/ui/Button.svelte';
-	import WorkCard from './WorkCard.svelte';
+	import WorkCard from '../receipts/WorkCard.svelte';
 	import {
 		Clock,
 		Coins,
