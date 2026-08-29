@@ -52,10 +52,12 @@
 
 	// The page's one state machine: which screen owns the center.
 	const phase = $derived.by(
-		(): 'preparing' | 'welcome' | 'add-turns' | 'chat' | 'reset' | 'error' => {
+		(): 'preparing' | 'welcome' | 'reconfirm' | 'add-turns' | 'chat' | 'reset' | 'error' => {
 			switch (proofs.onboarding) {
 				case 'needs-activation':
 					return 'welcome';
+				case 'reconfirm':
+					return 'reconfirm';
 				case 'reset-required':
 					return 'reset';
 				case 'error':
@@ -220,9 +222,11 @@
 					disabled={true}
 					placeholder={phase === 'add-turns'
 						? 'Add turns to begin chatting'
-						: phase === 'welcome' || phase === 'preparing'
-							? 'Start your log to begin chatting'
-							: 'Start fresh to continue'}
+						: phase === 'reconfirm'
+							? "Confirm it's you to continue"
+							: phase === 'welcome' || phase === 'preparing'
+								? 'Start your log to begin chatting'
+								: 'Start fresh to continue'}
 					onsend={() => {}}
 				/>
 			</div>

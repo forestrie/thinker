@@ -35,6 +35,9 @@ authority without you.
 - **An occasional "resume"** — sealing authority deliberately lapses after a
   few hours away; one approval renews it. The browser endorsement renews
   itself with a single prompt on your next message, roughly weekly.
+- **An occasional "welcome back"** — if this browser's approval lapsed
+  entirely while you were away, one prompt (after you press the button)
+  re-approves it before you chat.
 
 Chatting itself never prompts. If something asks for Touch ID mid-conversation
 and you didn't just press a button that says so, decline it.
