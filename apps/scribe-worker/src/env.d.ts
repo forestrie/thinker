@@ -22,9 +22,10 @@ declare global {
 		DEMO_PASSWORD?: string;
 		/**
 		 * `off` disables the demo gate outright, even with DEMO_PASSWORD set —
-		 * the explicit switch for local dev and integration tests. Only the exact
-		 * string `off` counts; anything else leaves the gate up. Not on
-		 * deploy.yml's --var allowlist, and its preflight rejects it.
+		 * the explicit switch for local dev, integration tests, and a deployed
+		 * environment deliberately opened to the public. Only the exact string
+		 * `off` counts; anything else leaves the gate up, and deploy.yml's
+		 * preflight refuses to deploy any other value.
 		 */
 		DEMO_GATE?: string;
 		/**
