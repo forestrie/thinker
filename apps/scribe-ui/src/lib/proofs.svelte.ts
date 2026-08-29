@@ -144,7 +144,8 @@ export class ProofPanel implements EndorsementProvider {
 	 * The mount-time half of onboarding (4.3) — NO user gesture available, so
 	 * this only re-posts a shape that already exists or defers. The decision
 	 * table is `bootRegistration` (custody.ts): an existing passkey re-posts
-	 * the endorsed shape silently (endorsement cached — one gesture EVER); a
+	 * the endorsed shape silently while its cached endorsement is usable, and
+	 * lands on `reconfirm` (one click, one prompt) when it is not; a
 	 * WebAuthn-free runtime posts the 4a session root; anything else declares
 	 * the custody choice PENDING to the DO — which then holds `grant_user`
 	 * until a root lands — and waits for the activation gesture.
@@ -261,15 +262,29 @@ export class ProofPanel implements EndorsementProvider {
 	async confirmPasskey(): Promise<void> {
 		if (this.activating) return;
 		this.activating = true;
+		// A failed previous attempt escalates to force: re-posting the same
+		// refused endorsement loops forever (clock-skew/UV 400s), and a fresh
+		// assertion is the designed escape — the click provides the gesture.
+		const retryHard = this.onboardingDetail !== null;
 		this.onboardingDetail = null;
 		try {
-			await this.#postEndorsedRoot();
+			await this.#postEndorsedRoot({ force: retryHard });
 			await this.refresh();
 		} catch (err) {
 			if (err instanceof ScribeApiError && err.status === 409) {
-				this.onboarding = 'reset-required';
-				this.onboardingDetail =
-					'a different root is already pinned to this log — reset your identity to re-root';
+				// Not necessarily fatal: a legacy 4a instance is rooted by this
+				// browser's SESSION key (the passkey record exists locally but
+				// never became the root). The bare post self-diagnoses — it
+				// stands for that cohort, and 409s only for a genuinely
+				// foreign root. Never send a recoverable user to a reset.
+				try {
+					await this.#postSessionRoot();
+					await this.refresh();
+				} catch {
+					this.onboarding = 'reset-required';
+					this.onboardingDetail =
+						'a different root is already pinned to this log — reset your identity to re-root';
+				}
 			} else {
 				// A refused or failed gesture stays on the reconfirm card.
 				this.onboarding = 'reconfirm';
@@ -486,7 +501,10 @@ export class ProofPanel implements EndorsementProvider {
 		// nothing to choose — settle on the 4a session shape (turn admission
 		// still verifies envelopes against it). The mode is only knowable from
 		// the DO, and the pending declaration had to land before this fetch.
-		if (this.export?.attestationMode === 'embed' && this.onboarding === 'needs-activation')
+		if (
+			this.export?.attestationMode === 'embed' &&
+			(this.onboarding === 'needs-activation' || this.onboarding === 'reconfirm')
+		)
 			await this.#postSessionRoot().catch((err) => {
 				this.onboarding = 'error';
 				this.onboardingDetail = String(err);
