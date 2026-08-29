@@ -1,12 +1,14 @@
 <script lang="ts">
 	import Button from '$lib/components/ui/Button.svelte';
-	import { SendHorizontal, PenLine } from '@lucide/svelte';
+	import { SendHorizontal } from '@lucide/svelte';
 
 	let {
 		disabled = false,
+		placeholder = 'Type a message…',
 		onsend
 	}: {
 		disabled?: boolean;
+		placeholder?: string;
 		onsend: (input: string) => void;
 	} = $props();
 
@@ -29,14 +31,16 @@
 
 <div class="border-t border-kumo-hairline p-3">
 	<div
-		class="flex items-end gap-2 rounded-xl border border-kumo-line bg-kumo-base px-3 py-2 focus-within:border-kumo-focus"
+		class="flex items-end gap-2 rounded-xl border border-kumo-line bg-kumo-base px-3 py-2 focus-within:border-kumo-focus {disabled
+			? 'opacity-60'
+			: ''}"
 	>
 		<textarea
 			bind:value={input}
 			{onkeydown}
 			{disabled}
+			{placeholder}
 			rows="1"
-			placeholder="Say something — your words are signed and committed…"
 			class="max-h-40 min-h-[1.75rem] flex-1 resize-none bg-transparent text-sm text-kumo-default outline-none placeholder:text-kumo-placeholder"
 		></textarea>
 		<Button variant="primary" size="sm" disabled={disabled || !input.trim()} onclick={submit}>
@@ -44,8 +48,4 @@
 			Send
 		</Button>
 	</div>
-	<p class="mt-1.5 flex items-center gap-1 text-[11px] text-kumo-subtle">
-		<PenLine class="size-3" />
-		Each turn is wallet-signed (KS256 COSE) and admitted as an attested work unit.
-	</p>
 </div>

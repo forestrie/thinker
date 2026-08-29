@@ -1,19 +1,26 @@
 <script lang="ts">
 	import { cn } from '$lib/utils.ts';
 	import type { ChatMessage } from '$lib/chat.svelte.ts';
-	import { Wrench, CircleAlert } from '@lucide/svelte';
+	import { Wrench, CircleAlert, Check } from '@lucide/svelte';
 
-	let { message }: { message: ChatMessage } = $props();
+	let {
+		message,
+		caption = null
+	}: {
+		message: ChatMessage;
+		/** Ambient receipt status under the bubble; null renders nothing. */
+		caption?: { label: string; bad: boolean } | null;
+	} = $props();
 
 	const isUser = $derived(message.role === 'user');
 </script>
 
-<div class={cn('flex', isUser ? 'justify-end' : 'justify-start')}>
+<div class={cn('flex flex-col gap-1', isUser ? 'items-end' : 'items-start')}>
 	<div
 		class={cn(
 			'max-w-[85%] rounded-2xl px-3.5 py-2 text-sm leading-relaxed',
 			isUser
-				? 'rounded-br-md bg-kumo-brand text-white'
+				? 'rounded-br-md bg-kumo-info-tint text-kumo-strong'
 				: 'rounded-bl-md border border-kumo-hairline bg-kumo-elevated text-kumo-default'
 		)}
 	>
@@ -43,4 +50,21 @@
 			></span>
 		{/if}
 	</div>
+	{#if caption}
+		<span
+			class={cn(
+				'flex items-center gap-1 text-[11px]',
+				caption.bad ? 'text-kumo-danger' : 'text-kumo-subtle'
+			)}
+		>
+			{#if caption.label === 'receipted' || caption.label === 'verified'}
+				<Check class="size-3 text-kumo-success" />
+			{:else if caption.bad}
+				<CircleAlert class="size-3" />
+			{:else}
+				<span class="size-2.5 rounded-full border-[1.5px] border-kumo-interact"></span>
+			{/if}
+			{caption.label}
+		</span>
+	{/if}
 </div>

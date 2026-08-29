@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { SvelteMap } from 'svelte/reactivity';
 	import { DemoWallet } from '$lib/wallet.svelte.ts';
 	import { UserRootKey } from '$lib/user-root.ts';
 	import { PasskeyRoot } from '$lib/passkey.ts';
@@ -7,14 +8,15 @@
 	import { ScribeChat } from '$lib/chat.svelte.ts';
 	import { ProofPanel as ProofPanelState } from '$lib/proofs.svelte.ts';
 	import { TurnVault } from '$lib/vault.svelte.ts';
+	import { leasePhase } from '$lib/lease.ts';
+	import { matchWorkIds } from '$lib/transcript-match.ts';
+	import { agentTurnStatus, captionLabel, userTurnStatus } from '$lib/receipt-status.ts';
+	import AppHeader from '$lib/components/AppHeader.svelte';
+	import ReceiptBanner from '$lib/components/ReceiptBanner.svelte';
+	import SetupCard from '$lib/components/setup/SetupCard.svelte';
 	import ChatPanel from '$lib/components/chat/ChatPanel.svelte';
-	import ProofPanel from '$lib/components/proof/ProofPanel.svelte';
-	import Badge from '$lib/components/ui/Badge.svelte';
-	import Button from '$lib/components/ui/Button.svelte';
-	import { shortHex } from '$lib/utils.ts';
-	import { usdcBalance, paymentFromChallenge, BASE_SEPOLIA_USDC } from '$lib/usdc.ts';
-	import ScribeMark from '$lib/components/ScribeMark.svelte';
-	import { Wallet, RotateCcw, Copy, Check } from '@lucide/svelte';
+	import Composer from '$lib/components/chat/Composer.svelte';
+	import ReceiptsDrawer from '$lib/components/receipts/ReceiptsDrawer.svelte';
 
 	const wallet = new DemoWallet();
 	const session = new ScribeSession(wallet);
@@ -39,52 +41,89 @@
 	// A settled turn means new commitments are in flight — pull the export.
 	chat.onTurnSettled = () => void proofs.refresh();
 
-	// Funding aid (paid lane): the browser wallet is the x402 payer, so it must
-	// hold Base Sepolia USDC. Surface a copyable address and the live balance so
-	// the user can fund it from their own wallet and watch it arrive. The exact
-	// token + price come from any parked x402 challenge; else the Base Sepolia
-	// USDC default.
-	let copied = $state(false);
-	let balance = $state<number | null>(null);
-	let balanceError = $state<string | null>(null);
-	const payment = $derived(paymentFromChallenge(proofs.grantChallenge));
-
-	// Chat is locked until a log root is registered (4.3): turn admission
-	// verifies the signed envelope against the pinned root, so before the
-	// custody choice lands there is nothing a turn could be admitted against.
-	const chatLock = $derived.by(() => {
-		switch (proofs.onboarding) {
-			case 'registered':
-				return null;
-			case 'needs-activation':
-				return 'Activate your log in the proof panel before chatting — your turns are signed against the key you choose there.';
-			case 'reset-required':
-				return proofs.onboardingDetail ?? 'reset your identity to continue';
-			case 'error':
-				return `log root registration failed: ${proofs.onboardingDetail ?? 'unknown error'}`;
-			default:
-				return 'preparing your log root…';
-		}
+	let drawerOpen = $state(false);
+	// Slow tick for the lease-driven chips and banner: they display minutes,
+	// so 30s keeps them honest without busywork.
+	let now = $state(Date.now());
+	$effect(() => {
+		const timer = setInterval(() => (now = Date.now()), 30_000);
+		return () => clearInterval(timer);
 	});
 
-	async function copyAddress() {
-		try {
-			await navigator.clipboard.writeText(wallet.address);
-			copied = true;
-			setTimeout(() => (copied = false), 1500);
-		} catch {
-			// Clipboard blocked (insecure context / permissions) — the full
-			// address is still selectable via the title tooltip.
+	// The page's one state machine: which screen owns the center.
+	const phase = $derived.by(
+		(): 'preparing' | 'welcome' | 'add-turns' | 'chat' | 'reset' | 'error' => {
+			switch (proofs.onboarding) {
+				case 'needs-activation':
+					return 'welcome';
+				case 'reset-required':
+					return 'reset';
+				case 'error':
+					return 'error';
+				case 'registered':
+					// A parked challenge with no user log and NO conversation yet is
+					// the unpaid first batch — the explicit Approve payment step
+					// (setup, step 2). Mid-conversation the same wire state is batch
+					// exhaustion (the DO clears the log id and parks a fresh
+					// challenge): that belongs to the OutOfTurnsBar — a transcript
+					// the user is reading must never unmount.
+					return proofs.grantChallenge !== null &&
+						proofs.userLogId === null &&
+						chat.messages.length === 0
+						? 'add-turns'
+						: 'chat';
+				default:
+					return 'preparing';
+			}
 		}
-	}
+	);
 
-	async function refreshBalance() {
-		try {
-			balance = await usdcBalance(wallet.address, payment?.asset ?? BASE_SEPOLIA_USDC);
-			balanceError = null;
-		} catch (err) {
-			balanceError = String(err);
+	// Sealing needs one deliberate approval once the log exists, and again
+	// when its lease lapses — an ambient banner, never a chat blocker.
+	const bannerVariant = $derived.by((): 'first' | 'resume' | null => {
+		if (phase !== 'chat') return null;
+		if (proofs.userLogId !== null && !proofs.sealingDelegated) return 'first';
+		if (proofs.sealingDelegated) {
+			const p = leasePhase(proofs.sealingLeaseExpiresAt, now);
+			if (p === 'expiring' || p === 'expired') return 'resume';
 		}
+		return null;
+	});
+
+	// Ambient receipt captions: recover each message's workId (local echoes
+	// carry it; resynced ones match the vault by text), then read the work's
+	// state — user leaf for user bubbles, the work itself for replies.
+	const captions = $derived.by(() => {
+		const matchable = chat.messages.map((m) => ({
+			id: m.id,
+			role: m.role,
+			workId: m.workId,
+			text: m.parts
+				.filter((p) => p.type === 'text')
+				.map((p) => p.text ?? '')
+				.join('')
+		}));
+		const ids = matchWorkIds(matchable, vault.entries);
+		const byWork = new Map(proofs.works.map((w) => [w.workId, w]));
+		const out = new SvelteMap<string, { label: string; bad: boolean }>();
+		for (const m of matchable) {
+			const workId = ids.get(m.id);
+			const work = workId ? byWork.get(workId) : undefined;
+			if (!work) continue;
+			const status = m.role === 'user' ? userTurnStatus(work) : agentTurnStatus(work);
+			const label = captionLabel(status, proofs.verifications[work.workId]);
+			out.set(m.id, { label, bad: label === 'check failed' || label === 'failed' });
+		}
+		return out;
+	});
+
+	function openReceipts() {
+		drawerOpen = true;
+		// Re-check the receipts offline so rows can honestly say "verified" —
+		// but only when something receipted is still unchecked: verifyAll is
+		// sequential and holds the per-row Verify buttons disabled while it runs.
+		if (proofs.works.some((w) => w.state === 'receipted' && !proofs.verifications[w.workId]))
+			void proofs.verifyAll();
 	}
 
 	onMount(() => {
@@ -102,10 +141,7 @@
 				// session.error / chat.connectionDetail carry the story
 			}
 		})();
-		void refreshBalance();
-		const balanceTimer = setInterval(() => void refreshBalance(), 15_000);
 		return () => {
-			clearInterval(balanceTimer);
 			chat.disconnect();
 			proofs.stop();
 		};
@@ -125,66 +161,73 @@
 </script>
 
 <div class="flex h-dvh flex-col bg-kumo-recessed">
-	<header
-		class="flex items-center justify-between gap-3 border-b border-kumo-line bg-kumo-elevated px-4 py-2.5"
-	>
-		<div class="flex items-center gap-2.5">
-			<span class="flex size-8 items-center justify-center rounded-lg bg-kumo-brand text-white">
-				<ScribeMark class="size-5" />
-			</span>
-			<div>
-				<h1 class="text-sm leading-tight font-semibold text-kumo-strong">The Scribe</h1>
-				<p class="text-[11px] leading-tight text-kumo-subtle">
-					an attested conversation, receipted on a Forestrie transparency log
-				</p>
+	<AppHeader
+		{proofs}
+		{chat}
+		{session}
+		{wallet}
+		{now}
+		onreceipts={openReceipts}
+		onreset={resetIdentity}
+	/>
+
+	{#if bannerVariant}
+		<ReceiptBanner
+			variant={bannerVariant}
+			custody={proofs.custody}
+			busy={proofs.delegation === 'working'}
+			detail={proofs.delegation === 'error' ? proofs.delegationDetail : null}
+			onapprove={() => proofs.delegateUserSealing()}
+		/>
+	{:else if phase === 'chat' && proofs.userGrantError && proofs.userLogId === null && proofs.grantChallenge === null}
+		<!-- Grant acquisition is failing and there is no action to offer —
+		     say so plainly rather than letting held turns read as breakage. -->
+		<div class="flex justify-center px-3 pt-3">
+			<div
+				class="w-full max-w-3xl rounded-xl border border-kumo-warning/40 bg-kumo-warning-tint px-4 py-2.5 text-[13px] leading-snug text-kumo-default"
+			>
+				<strong class="font-semibold text-kumo-strong">Your log isn't ready yet</strong>
+				— we're retrying automatically. You can keep chatting; your turns are kept safe until it exists.
 			</div>
 		</div>
-		<div class="flex items-center gap-2">
-			{#if session.error}
-				<Badge tone="danger" title={session.error}>auth failed</Badge>
-			{/if}
-			<!-- USDC balance on Base Sepolia — this wallet pays for grants, so fund
-			     it if it reads 0. Shows the batch price when a challenge is parked. -->
-			<Badge
-				tone={balance !== null && balance === 0 ? 'warning' : 'neutral'}
-				title={balanceError
-					? `balance unavailable: ${balanceError}`
-					: `USDC on Base Sepolia — fund this wallet to buy grants${
-							payment ? ` ($${payment.usdc.toFixed(2)} per batch)` : ''
-						}`}
-			>
-				{balance === null ? '…' : balance.toFixed(2)} USDC
-			</Badge>
-			<!-- Click to copy the full address, so the user can send funds to it. -->
-			<button
-				type="button"
-				onclick={copyAddress}
-				title="Copy full address — {wallet.address}"
-				class="flex items-center gap-1.5 rounded-md border border-kumo-line bg-kumo-recessed px-2 py-1 font-mono text-[11px] text-kumo-default hover:bg-kumo-elevated"
-			>
-				<Wallet class="size-3 text-kumo-subtle" />
-				{shortHex(wallet.address, 6, 4)}
-				{#if copied}
-					<Check class="size-3 text-kumo-success" />
-				{:else}
-					<Copy class="size-3 text-kumo-subtle" />
-				{/if}
-			</button>
-			<Button
-				size="sm"
-				variant="ghost"
-				title="Forget this identity and start fresh"
-				onclick={resetIdentity}
-			>
-				<RotateCcw class="size-3.5" />
-			</Button>
-		</div>
-	</header>
+	{/if}
 
-	<main
-		class="grid min-h-0 flex-1 grid-cols-1 gap-3 overflow-y-auto p-3 lg:grid-cols-[minmax(0,1fr)_420px] lg:overflow-hidden"
-	>
-		<ChatPanel {chat} lockNotice={chatLock} />
-		<ProofPanel {proofs} />
+	<main class="flex min-h-0 flex-1 flex-col">
+		{#if phase === 'chat'}
+			<ChatPanel
+				{chat}
+				{captions}
+				outOfTurns={proofs.prepaidTurns === 0 ||
+					(proofs.grantChallenge !== null && proofs.userLogId === null)}
+				addBusy={proofs.payment === 'paying'}
+				addDetail={proofs.payment === 'error' ? proofs.paymentDetail : null}
+				onaddturns={() => proofs.topUp()}
+			/>
+		{:else}
+			<div class="flex min-h-0 flex-1 items-center justify-center overflow-y-auto p-4">
+				{#if phase === 'preparing'}
+					<p class="text-sm text-kumo-subtle">Preparing…</p>
+				{:else}
+					<SetupCard
+						{proofs}
+						variant={phase === 'add-turns' ? 'add-turns' : phase === 'welcome' ? 'welcome' : phase}
+						onreset={resetIdentity}
+					/>
+				{/if}
+			</div>
+			<div class="mx-auto w-full max-w-3xl">
+				<Composer
+					disabled={true}
+					placeholder={phase === 'add-turns'
+						? 'Add turns to begin chatting'
+						: phase === 'welcome' || phase === 'preparing'
+							? 'Start your log to begin chatting'
+							: 'Start fresh to continue'}
+					onsend={() => {}}
+				/>
+			</div>
+		{/if}
 	</main>
+
+	<ReceiptsDrawer {proofs} open={drawerOpen} onclose={() => (drawerOpen = false)} />
 </div>

@@ -84,7 +84,7 @@ async function main() {
 
 	// 1. The dev server serves the shell.
 	const shell = await fetch(UI).then((r) => r.text());
-	check('vite serves the app shell', shell.includes('Scribe — attested conversation'));
+	check('vite serves the app shell', shell.includes('The Scribe — a conversation you can prove'));
 
 	// 2. wcc-1 session through the /auth proxy.
 	const chal = await (await fetch(`${UI}/auth/challenge`, { method: 'POST' })).json();

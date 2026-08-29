@@ -423,19 +423,17 @@ export class ScribeChat {
 			return workId;
 		} catch (err) {
 			// 402 = prepaid batch spent (W4c): the DO refused the turn and is
-			// already re-requesting a grant — the proof panel's poll picks up
-			// the fresh challenge (or the top-up button kicks it).
-			// 429 = a daily demo-turn cap: a time-boxed bound the wallet cannot top
-			// up, so do NOT point at the proof panel.
+			// already re-requesting a grant — the "Add more turns" button pays it.
+			// 429 = a daily demo-turn cap: a time-boxed bound money cannot lift.
 			if (err instanceof ScribeApiError && err.status === 402) {
-				this.turnError = 'Prepaid turns exhausted — top up in the proof panel to continue.';
+				this.turnError = "You're out of turns — add more to keep chatting.";
 			} else if (err instanceof ScribeApiError && err.status === 403) {
 				// The DO's ADR-0065 §4 pre-flight (mirroring canopy) refused the
-				// endorsement — the proof panel's re-endorse button is the fix.
-				this.turnError = `Your passkey's endorsement of this browser's signing key was refused (${err.message}) — re-endorse it in the proof panel.`;
-			} else if (err instanceof ScribeApiError && err.status === 429) {
+				// endorsement; the next send re-endorses with one prompt.
 				this.turnError =
-					'Daily demo-turn cap reached — this shared demo is rate-limited today. Please try again tomorrow.';
+					"Your Touch ID approval for this browser has lapsed — send again and you'll be asked to approve once.";
+			} else if (err instanceof ScribeApiError && err.status === 429) {
+				this.turnError = "The demo's daily turn limit is used up — please come back tomorrow.";
 			} else {
 				this.turnError = String(err);
 			}

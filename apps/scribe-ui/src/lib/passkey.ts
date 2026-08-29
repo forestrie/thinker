@@ -176,8 +176,9 @@ export class PasskeyRoot {
 	 * key for a validity window, in the ADR-0063 envelope with the v2 typed
 	 * payload. Cached — the gesture repeats when the session key changes or
 	 * the window nears lapse (`needsReendorsement`), or when `force` is set
-	 * (the explicit "re-endorse now" button). Must run from a user activation
-	 * when a gesture is due.
+	 * (the receipts drawer's Advanced re-endorse control — the escape hatch
+	 * when the server refuses an endorsement this browser still considers
+	 * active). Must run from a user activation when a gesture is due.
 	 */
 	async ensureEndorsement(
 		sessionPublicKeyXY: Uint8Array,
