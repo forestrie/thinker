@@ -6,10 +6,14 @@ proven by the CI `register-grant-payment` spec; this runbook proves the **thinke
 product loop**: fresh wallet → pay once → N turns → both leaves receipted → turn
 N+1 refused → top-up restores.
 
-> **Topology.** This is a **local** stack — the grant authority runs on
-> `localhost:8799`, so the loop is driven by `wrangler dev` + `vite dev` on your
-> machine talking to live lane A. There is no production Cloudflare deploy (a
-> deployed Worker can't reach the localhost authority).
+> **Topology.** This runbook drives a **local** stack — the grant authority on
+> `localhost:8799`, `wrangler dev` + `vite dev` on your machine — talking to
+> live lane A. That is a choice, not a limit: the same three Workers deploy to
+> Cloudflare via `.github/workflows/deploy.yml` (manual dispatch, `dev` env,
+> `thinker-dev` + `thinker-ui-dev` + `thinker-grant-authority-dev`, pointed at
+> lane A through GitHub Environment vars). Prefer the deployed estate for
+> anything origin-bound — passkeys (plan-2608-13) are rpId-scoped, so a
+> `localhost` passkey never transfers to the deployed origin.
 
 ---
 
