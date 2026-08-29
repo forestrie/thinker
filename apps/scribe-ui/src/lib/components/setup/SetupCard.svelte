@@ -85,15 +85,20 @@
 		<Button
 			variant="primary"
 			class="mt-1 w-full"
-			disabled={proofs.payment === 'paying' || proofs.payment === 'paid'}
+			disabled={proofs.payment !== 'idle' && proofs.payment !== 'error'}
 			onclick={() => void proofs.ensureUserGrantPaid()}
 		>
-			{#if proofs.payment === 'paying'}
+			{#if proofs.payment === 'paying' || proofs.payment === 'processing'}
 				<LoaderCircle class="size-4 animate-spin" />
 			{/if}
 			Approve payment
 		</Button>
-		{#if proofs.payment === 'paid'}
+		{#if proofs.payment === 'processing'}
+			<p class="flex items-center gap-1.5 text-xs text-kumo-subtle">
+				<LoaderCircle class="size-3 animate-spin" />
+				Payment received — sealing your grant into the log (a minute or two)…
+			</p>
+		{:else if proofs.payment === 'paid'}
 			<p class="flex items-center gap-1.5 text-xs text-kumo-subtle">
 				<LoaderCircle class="size-3 animate-spin" />
 				Payment received — preparing your log…
