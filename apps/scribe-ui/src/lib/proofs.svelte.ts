@@ -25,6 +25,7 @@ import {
 } from './scribe-api.ts';
 import { bootRegistration } from './custody.ts';
 import { endorsementPhase } from './endorsement.ts';
+import { isPendingIssuance } from './payment-pending.ts';
 import type { EndorsementProvider } from './chat.svelte.ts';
 import type { ScribeSession } from './session.svelte.ts';
 import type { DemoWallet } from './wallet.svelte.ts';
@@ -460,7 +461,13 @@ export class ProofPanel implements EndorsementProvider {
 	 */
 	async ensureUserGrantPaid(): Promise<void> {
 		const challenge = this.grantChallenge;
-		if (!challenge || this.userLogId) return;
+		if (!challenge || this.userLogId) {
+			// A pending purchase that no longer has anything to resume (the
+			// grant landed — possibly via another tab) must settle, or
+			// 'processing' pins the busy state and the poll forever.
+			if (this.payment === 'processing') this.payment = 'paid';
+			return;
+		}
 		this.#paying ??= this.#payUserGrant(challenge).finally(() => {
 			this.#paying = null;
 		});
@@ -483,7 +490,7 @@ export class ProofPanel implements EndorsementProvider {
 			// RESUMES that registration (grant-authority issue.ts, "resumable
 			// registration"); it can never mint a second grant or charge
 			// again. Keep resuming on the poll: consent was the Approve click.
-			if (/"pending":\s*true|registration still pending/.test(String(err))) {
+			if (isPendingIssuance(String(err))) {
 				this.payment = 'processing';
 				this.paymentDetail = null;
 				this.#schedulePoll();

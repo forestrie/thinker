@@ -96,7 +96,7 @@
 		{#if proofs.payment === 'processing'}
 			<p class="flex items-center gap-1.5 text-xs text-kumo-subtle">
 				<LoaderCircle class="size-3 animate-spin" />
-				Payment received — sealing your grant into the log (a minute or two)…
+				Payment received — finishing up (a minute or two)…
 			</p>
 		{:else if proofs.payment === 'paid'}
 			<p class="flex items-center gap-1.5 text-xs text-kumo-subtle">
