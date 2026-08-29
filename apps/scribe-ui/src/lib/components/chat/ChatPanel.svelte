@@ -35,12 +35,18 @@
 	$effect(() => {
 		// Follow the tail as messages append, stream, or grow a caption line
 		// (receipts land after the turn — without the captions dependency the
-		// last caption can sit under the fold).
+		// last caption can sit under the fold). Only when the user is already
+		// at the tail: `captions` is rebuilt by every receipt poll, and
+		// unconditionally scrolling here would yank a reader who scrolled up
+		// back to the bottom every few seconds.
 		void chat.messages.length;
 		void chat.streamTick;
-		void captions.size;
+		void captions;
+		const el = scroller;
+		if (!el) return;
+		const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
 		void tick().then(() => {
-			scroller?.scrollTo({ top: scroller.scrollHeight });
+			if (nearBottom) el.scrollTo({ top: el.scrollHeight });
 		});
 	});
 

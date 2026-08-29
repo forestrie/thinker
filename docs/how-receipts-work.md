@@ -30,6 +30,11 @@ on-chain-anchored checkpoint. The caption under a message tracks exactly that:
 has been collected, and **verified** once this browser has re-checked the
 receipt's cryptography for itself.
 
+Your own side of a turn has one extra wait: until you approve receipts for
+your log (the one-time sealing authorization the banner asks for), your
+entries are held and stay at **receipting…** — they catch up on their own once
+you approve.
+
 ## Offline, forever
 
 Receipts verify against public information — a root public key and the

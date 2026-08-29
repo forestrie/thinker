@@ -346,7 +346,12 @@ export class ProofPanel implements EndorsementProvider {
 	 * why sealing can only be authorized AFTER the first turn.
 	 */
 	get userLogId(): string | null {
-		return this.export?.forestrie.userLogId ?? this.identity?.userLogId ?? null;
+		// Once an export exists it is authoritative: the pinned identity goes
+		// stale across a top-up (the DO clears the log id at exhaustion and
+		// re-acquires), and falling back to it makes the top-up purchase a
+		// silent no-op after a mid-batch reload.
+		if (this.export) return this.export.forestrie.userLogId;
+		return this.identity?.userLogId ?? null;
 	}
 
 	/** True once the DO knows sealing was authorized (any session). */

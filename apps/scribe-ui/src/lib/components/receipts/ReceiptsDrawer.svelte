@@ -19,16 +19,18 @@
 
 	let heading = $state<HTMLHeadingElement | null>(null);
 
-	// Focus lands on the drawer title when it opens; the opener restores its
-	// own focus (the Receipts button keeps focus by default on close). Body
+	// Focus lands on the drawer title on open and returns to the opener on
+	// close (no focus trap — Escape and the backdrop are the exits). Body
 	// scroll locks while the overlay is up.
 	$effect(() => {
 		if (!open) return;
+		const opener = document.activeElement;
 		heading?.focus();
 		const prev = document.body.style.overflow;
 		document.body.style.overflow = 'hidden';
 		return () => {
 			document.body.style.overflow = prev;
+			if (opener instanceof HTMLElement) opener.focus();
 		};
 	});
 
@@ -135,9 +137,10 @@
 				</button>
 			</p>
 
-			<!-- Depth on demand: the one surface where protocol vocabulary is
-			     allowed to survive. Everything here moved from the old proof
-			     panel unchanged in behavior. -->
+			<!-- Depth on demand: protocol vocabulary is confined to this
+			     disclosure and to an expanded receipt row's WorkCard — never
+			     the page. Everything here moved from the old proof panel
+			     unchanged in behavior. -->
 			<details class="group">
 				<summary
 					class="cursor-pointer list-none text-[11px] font-medium text-kumo-subtle hover:text-kumo-default [&::-webkit-details-marker]:hidden"
@@ -221,7 +224,7 @@
 						</p>
 					{/if}
 
-					<div class="flex items-center gap-2">
+					<div class="flex flex-wrap items-center gap-2">
 						<Button
 							size="sm"
 							variant="ghost"
@@ -232,6 +235,23 @@
 							<RefreshCw class="size-3.5 {proofs.refreshing ? 'animate-spin' : ''}" />
 							Refresh receipts
 						</Button>
+						{#if proofs.custody === 'passkey'}
+							<!-- The escape hatch when the server refuses an endorsement
+							     this browser still considers active: forces a fresh
+							     passkey assertion (one prompt). -->
+							<Button
+								size="sm"
+								variant="ghost"
+								disabled={proofs.reendorsing}
+								title="Force a fresh passkey endorsement of this browser's signing key — one prompt"
+								onclick={() => proofs.reendorse()}
+							>
+								{#if proofs.reendorsing}
+									<LoaderCircle class="size-3.5 animate-spin" />
+								{/if}
+								Re-endorse this browser
+							</Button>
+						{/if}
 						{#if proofs.anyInFlight}
 							<Badge tone="info"><LoaderCircle class="size-3 animate-spin" /> collecting</Badge>
 						{/if}

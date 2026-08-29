@@ -61,9 +61,17 @@
 				case 'error':
 					return 'error';
 				case 'registered':
-					// A parked challenge with no user log yet means the batch is
-					// unpaid — the explicit Approve payment step (setup, step 2).
-					return proofs.grantChallenge !== null && proofs.userLogId === null ? 'add-turns' : 'chat';
+					// A parked challenge with no user log and NO conversation yet is
+					// the unpaid first batch — the explicit Approve payment step
+					// (setup, step 2). Mid-conversation the same wire state is batch
+					// exhaustion (the DO clears the log id and parks a fresh
+					// challenge): that belongs to the OutOfTurnsBar — a transcript
+					// the user is reading must never unmount.
+					return proofs.grantChallenge !== null &&
+						proofs.userLogId === null &&
+						chat.messages.length === 0
+						? 'add-turns'
+						: 'chat';
 				default:
 					return 'preparing';
 			}
@@ -111,8 +119,11 @@
 
 	function openReceipts() {
 		drawerOpen = true;
-		// Re-check the receipts offline so rows can honestly say "verified".
-		void proofs.verifyAll();
+		// Re-check the receipts offline so rows can honestly say "verified" —
+		// but only when something receipted is still unchecked: verifyAll is
+		// sequential and holds the per-row Verify buttons disabled while it runs.
+		if (proofs.works.some((w) => w.state === 'receipted' && !proofs.verifications[w.workId]))
+			void proofs.verifyAll();
 	}
 
 	onMount(() => {
@@ -168,6 +179,17 @@
 			detail={proofs.delegation === 'error' ? proofs.delegationDetail : null}
 			onapprove={() => proofs.delegateUserSealing()}
 		/>
+	{:else if phase === 'chat' && proofs.userGrantError && proofs.userLogId === null && proofs.grantChallenge === null}
+		<!-- Grant acquisition is failing and there is no action to offer —
+		     say so plainly rather than letting held turns read as breakage. -->
+		<div class="flex justify-center px-3 pt-3">
+			<div
+				class="w-full max-w-3xl rounded-xl border border-kumo-warning/40 bg-kumo-warning-tint px-4 py-2.5 text-[13px] leading-snug text-kumo-default"
+			>
+				<strong class="font-semibold text-kumo-strong">Your log isn't ready yet</strong>
+				— we're retrying automatically. You can keep chatting; your turns are kept safe until it exists.
+			</div>
+		</div>
 	{/if}
 
 	<main class="flex min-h-0 flex-1 flex-col">
@@ -175,7 +197,8 @@
 			<ChatPanel
 				{chat}
 				{captions}
-				outOfTurns={proofs.prepaidTurns === 0}
+				outOfTurns={proofs.prepaidTurns === 0 ||
+					(proofs.grantChallenge !== null && proofs.userLogId === null)}
 				addBusy={proofs.payment === 'paying'}
 				addDetail={proofs.payment === 'error' ? proofs.paymentDetail : null}
 				onaddturns={() => proofs.topUp()}
@@ -197,7 +220,9 @@
 					disabled={true}
 					placeholder={phase === 'add-turns'
 						? 'Add turns to begin chatting'
-						: 'Start your log to begin chatting'}
+						: phase === 'welcome' || phase === 'preparing'
+							? 'Start your log to begin chatting'
+							: 'Start fresh to continue'}
 					onsend={() => {}}
 				/>
 			</div>

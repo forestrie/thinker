@@ -55,9 +55,20 @@ describe('captionLabel', () => {
 		expect(captionLabel('error')).toBe('failed');
 	});
 
-	it('a completed verification wins over the raw status', () => {
+	it('a completed verification wins over a receipted status', () => {
 		expect(captionLabel('receipted', { ok: true })).toBe('verified');
 		expect(captionLabel('receipted', { ok: false })).toBe('check failed');
+	});
+
+	it('never claims verified for a side that has not receipted', () => {
+		// verifyAll reports work-level ok while a held user leaf is merely
+		// skipped — that must not read as "verified" on the user's bubble.
+		expect(captionLabel('receipting', { ok: true })).toBe('receipting…');
+		expect(captionLabel('error', { ok: true })).toBe('failed');
+	});
+
+	it('a failed check is never softened, receipted or not', () => {
+		expect(captionLabel('receipting', { ok: false })).toBe('check failed');
 	});
 });
 

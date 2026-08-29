@@ -30,12 +30,16 @@ export function userTurnStatus(work: WorkExportWire): TurnStatus {
 }
 
 /**
- * The caption under a bubble (and the status column of a receipt row). A
- * completed offline verification wins over the raw status — "verified" is the
- * strongest claim the page makes, and a failed check must never be softened.
+ * The caption under a bubble (and the status column of a receipt row).
+ * "verified" is the strongest claim the page makes, so a verification result
+ * may only speak for a side that actually reached "receipted" — verifyAll
+ * runs per WORK and reports ok while a held user leaf is merely SKIPPED, and
+ * captioning that "verified" would overclaim about an unsealed leaf. A failed
+ * check, conversely, must never be softened.
  */
 export function captionLabel(status: TurnStatus, verification?: { ok: boolean }): string {
-	if (verification) return verification.ok ? 'verified' : 'check failed';
+	if (verification && status === 'receipted') return verification.ok ? 'verified' : 'check failed';
+	if (verification && !verification.ok) return 'check failed';
 	switch (status) {
 		case 'receipted':
 			return 'receipted';
