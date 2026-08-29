@@ -25,6 +25,7 @@ import {
 } from './scribe-api.ts';
 import { bootRegistration } from './custody.ts';
 import { endorsementPhase } from './endorsement.ts';
+import { isPendingIssuance } from './payment-pending.ts';
 import type { EndorsementProvider } from './chat.svelte.ts';
 import type { ScribeSession } from './session.svelte.ts';
 import type { DemoWallet } from './wallet.svelte.ts';
@@ -117,7 +118,9 @@ export class ProofPanel implements EndorsementProvider {
 	#leaseExpiresAt = $state<number | null>(null);
 
 	/** x402 user-grant purchase (W4b): the wallet signs the parked challenge. */
-	payment = $state<'idle' | 'paying' | 'paid' | 'error'>('idle');
+	// 'processing' = the payment settled but grant issuance is waiting on the
+	// covering seal (the authority's 504 pending answer) — resumed on the poll.
+	payment = $state<'idle' | 'paying' | 'processing' | 'paid' | 'error'>('idle');
 	paymentDetail = $state<string | null>(null);
 	#paying: Promise<void> | null = null;
 
@@ -512,6 +515,9 @@ export class ProofPanel implements EndorsementProvider {
 		// A parked x402 challenge (W4b) is NOT paid here: money moves only on an
 		// explicit gesture — the setup card's "Approve payment" or the
 		// out-of-turns "Add more turns", both of which call ensureUserGrantPaid.
+		// The one exception is a purchase the user ALREADY approved that came
+		// back pending: resume it until the covering seal lands.
+		if (this.payment === 'processing') void this.ensureUserGrantPaid();
 		this.#schedulePoll();
 	}
 
@@ -524,7 +530,13 @@ export class ProofPanel implements EndorsementProvider {
 	 */
 	async ensureUserGrantPaid(): Promise<void> {
 		const challenge = this.grantChallenge;
-		if (!challenge || this.userLogId) return;
+		if (!challenge || this.userLogId) {
+			// A pending purchase that no longer has anything to resume (the
+			// grant landed — possibly via another tab) must settle, or
+			// 'processing' pins the busy state and the poll forever.
+			if (this.payment === 'processing') this.payment = 'paid';
+			return;
+		}
 		this.#paying ??= this.#payUserGrant(challenge).finally(() => {
 			this.#paying = null;
 		});
@@ -532,7 +544,7 @@ export class ProofPanel implements EndorsementProvider {
 	}
 
 	async #payUserGrant(challenge: string): Promise<void> {
-		this.payment = 'paying';
+		if (this.payment !== 'processing') this.payment = 'paying';
 		try {
 			const xPayment = this.#wallet.signX402Payment(challenge);
 			const token = await this.#session.ensure();
@@ -540,6 +552,19 @@ export class ProofPanel implements EndorsementProvider {
 			this.payment = 'paid';
 			this.paymentDetail = null;
 		} catch (err) {
+			// The authority's "pending" answer is NOT a failure: issuance waits
+			// on the covering seal (minutes-latent by design) and each request
+			// is capped at 60s, so it returns 504 {pending:true} with the
+			// registration — and the settled payment — persisted. A retry
+			// RESUMES that registration (grant-authority issue.ts, "resumable
+			// registration"); it can never mint a second grant or charge
+			// again. Keep resuming on the poll: consent was the Approve click.
+			if (isPendingIssuance(String(err))) {
+				this.payment = 'processing';
+				this.paymentDetail = null;
+				this.#schedulePoll();
+				return;
+			}
 			this.payment = 'error';
 			this.paymentDetail = String(err);
 			return;
@@ -623,7 +648,8 @@ export class ProofPanel implements EndorsementProvider {
 			this.export?.attestationMode === 'separate' &&
 			this.userLogId === null &&
 			this.onboarding === 'registered';
-		if (!this.anyInFlight && !onboarding) return;
+		// Also while a paid purchase is waiting out the covering seal.
+		if (!this.anyInFlight && !onboarding && this.payment !== 'processing') return;
 		this.#pollTimer = setTimeout(() => {
 			void this.refresh();
 		}, POLL_MS);

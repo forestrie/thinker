@@ -12,6 +12,7 @@
 		outOfTurns = false,
 		addBusy = false,
 		addDetail = null,
+		addNote = null,
 		onaddturns
 	}: {
 		chat: ScribeChat;
@@ -20,6 +21,7 @@
 		outOfTurns?: boolean;
 		addBusy?: boolean;
 		addDetail?: string | null;
+		addNote?: string | null;
 		onaddturns: () => void;
 	} = $props();
 
@@ -100,7 +102,7 @@
 
 	<div class="mx-auto w-full max-w-3xl">
 		{#if outOfTurns}
-			<OutOfTurnsBar busy={addBusy} detail={addDetail} onadd={onaddturns} />
+			<OutOfTurnsBar busy={addBusy} detail={addDetail} note={addNote} onadd={onaddturns} />
 		{:else}
 			<Composer disabled={chat.connection !== 'connected' || chat.awaiting} {onsend} />
 		{/if}

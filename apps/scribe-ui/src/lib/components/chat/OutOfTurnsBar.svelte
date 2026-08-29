@@ -5,11 +5,14 @@
 	let {
 		busy,
 		detail = null,
+		note = null,
 		onadd
 	}: {
 		busy: boolean;
 		/** Payment failure detail — the balance hint lives behind the wallet chip. */
 		detail?: string | null;
+		/** In-progress reassurance (a pending purchase resuming) — quiet, not red. */
+		note?: string | null;
 		onadd: () => void;
 	} = $props();
 </script>
@@ -31,6 +34,8 @@
 		</Button>
 		{#if detail}
 			<p class="w-full text-xs text-kumo-danger">{detail}</p>
+		{:else if note}
+			<p class="w-full text-xs text-kumo-subtle">{note}</p>
 		{/if}
 	</div>
 </div>

@@ -201,8 +201,11 @@
 				{captions}
 				outOfTurns={proofs.prepaidTurns === 0 ||
 					(proofs.grantChallenge !== null && proofs.userLogId === null)}
-				addBusy={proofs.payment === 'paying'}
+				addBusy={proofs.payment === 'paying' || proofs.payment === 'processing'}
 				addDetail={proofs.payment === 'error' ? proofs.paymentDetail : null}
+				addNote={proofs.payment === 'processing'
+					? 'Payment received — finishing up (a minute or two)…'
+					: null}
 				onaddturns={() => proofs.topUp()}
 			/>
 		{:else}
