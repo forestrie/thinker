@@ -9,7 +9,7 @@
 		onreset
 	}: {
 		proofs: ProofPanel;
-		variant: 'welcome' | 'add-turns' | 'reset' | 'error';
+		variant: 'welcome' | 'reconfirm' | 'add-turns' | 'reset' | 'error';
 		onreset: () => void;
 	} = $props();
 </script>
@@ -66,6 +66,45 @@
 		>
 			Why a passkey?
 		</a>
+		{#if proofs.onboardingDetail}
+			<p class="text-xs text-kumo-danger">{proofs.onboardingDetail}</p>
+		{/if}
+	{:else if variant === 'reconfirm'}
+		<span
+			class="flex size-14 items-center justify-center rounded-full bg-kumo-info-tint text-kumo-brand"
+		>
+			<Fingerprint class="size-7" />
+		</span>
+		<div class="space-y-2">
+			<h2 class="text-xl font-semibold tracking-tight text-kumo-strong">Welcome back</h2>
+			<p class="text-sm leading-relaxed text-kumo-subtle">
+				Your log is rooted in this device's passkey. One Touch ID re-approves this browser for
+				signing.
+			</p>
+		</div>
+		<div class="mt-1 flex w-full flex-col gap-2">
+			<Button
+				variant="primary"
+				disabled={proofs.activating}
+				title="Re-approve this browser's signing key with your existing passkey — one prompt"
+				onclick={() => proofs.confirmPasskey()}
+			>
+				{#if proofs.activating}
+					<LoaderCircle class="size-4 animate-spin" />
+				{:else}
+					<Fingerprint class="size-4" />
+				{/if}
+				Confirm with Touch ID
+			</Button>
+			<Button
+				variant="ghost"
+				disabled={proofs.activating}
+				title="Forget this identity and start a fresh log"
+				onclick={onreset}
+			>
+				Start fresh instead
+			</Button>
+		</div>
 		{#if proofs.onboardingDetail}
 			<p class="text-xs text-kumo-danger">{proofs.onboardingDetail}</p>
 		{/if}

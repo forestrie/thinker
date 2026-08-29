@@ -47,6 +47,17 @@ function inFlight(work: WorkExportWire): boolean {
 }
 
 /**
+ * `#postEndorsedRoot` in no-prompt mode found no usable endorsement: the
+ * fix is one assertion gesture, so the mount path maps this to `reconfirm`
+ * rather than showing an error or — the tripwire — prompting at page load.
+ */
+class GestureRequiredError extends Error {
+	constructor() {
+		super('a passkey gesture is required to re-endorse this browser');
+	}
+}
+
+/**
  * The Forestrie proof panel state (plan §5.1, "the demo's point"): the
  * per-turn commitment lifecycle from `GET /receipts`, offline verification
  * in the browser via the receipt.ts primitives, and the user-side sealing
@@ -75,11 +86,15 @@ export class ProofPanel implements EndorsementProvider {
 	 * its log root. `needs-activation` = WebAuthn is available and NO custody
 	 * shape is pinned — passkey creation waits behind the explicit "Activate
 	 * your log" gesture, and chat is locked (turn admission needs the root).
-	 * `reset-required` = the DO holds a root this browser no longer does.
+	 * `reconfirm` = a passkey record EXISTS but its cached endorsement is
+	 * unusable (absent, expired, v1, or the session key rotated) — one
+	 * assertion gesture re-approves this browser; creating a new passkey here
+	 * would 409 against the pinned root. `reset-required` = the DO holds a
+	 * root this browser no longer does.
 	 */
-	onboarding = $state<'pending' | 'needs-activation' | 'registered' | 'reset-required' | 'error'>(
-		'pending'
-	);
+	onboarding = $state<
+		'pending' | 'needs-activation' | 'reconfirm' | 'registered' | 'reset-required' | 'error'
+	>('pending');
 	onboardingDetail = $state<string | null>(null);
 	/** Which custody shape won: the passkey root, or the 4a session root. */
 	custody = $state<'passkey' | 'session' | null>(null);
@@ -142,7 +157,10 @@ export class ProofPanel implements EndorsementProvider {
 			});
 			if (plan === 'endorsed-post') {
 				try {
-					await this.#postEndorsedRoot();
+					// Mount NEVER prompts (ADR-0064's silent-creation tripwire
+					// applies to assertions too): if the cached endorsement is
+					// unusable, land on `reconfirm` and let its button gesture.
+					await this.#postEndorsedRoot({ prompt: false });
 				} catch (err) {
 					if (err instanceof ScribeApiError && err.status === 409) {
 						// Legacy instance: the pinned root predates passkey custody
@@ -150,10 +168,12 @@ export class ProofPanel implements EndorsementProvider {
 						// stands, and upgrading means an identity reset (ADR-0064).
 						await this.#postSessionRoot();
 					} else {
-						// Likely a re-endorsement needing a gesture (session key
-						// rotated) — the activation button retries WITH one.
-						this.onboarding = 'needs-activation';
-						this.onboardingDetail = String(err);
+						// A gesture is due (endorsement absent/expired/v1, or the
+						// session key rotated) — `confirmPasskey` retries WITH one.
+						// The sentinel needs no detail; anything else is worth
+						// showing on the card.
+						this.onboarding = 'reconfirm';
+						this.onboardingDetail = err instanceof GestureRequiredError ? null : String(err);
 					}
 				}
 			} else if (plan === 'bare-post') {
@@ -233,20 +253,51 @@ export class ProofPanel implements EndorsementProvider {
 	}
 
 	/**
-	 * Post root + session key + endorsement (ADR-0064 §3 pin-or-rotate; the
-	 * DO's copy is display-only since ADR-0065). At mount there is no user
-	 * activation, so an existing UNEXPIRED endorsement is re-posted as-is even
-	 * if it is lapsing — the next turn's click re-endorses it; only an absent
-	 * or expired one forces the gesture here (and a refused gesture lands in
-	 * `needs-activation`, whose button retries with one).
+	 * The `reconfirm` card's gesture (returning passkey user): re-endorse this
+	 * browser's session key with the EXISTING passkey — one assertion prompt,
+	 * riding on the click — and post the endorsed shape. Never creates a
+	 * credential: the root is already pinned, and `create()` would 409.
 	 */
-	async #postEndorsedRoot(opts: { force?: boolean } = {}): Promise<void> {
+	async confirmPasskey(): Promise<void> {
+		if (this.activating) return;
+		this.activating = true;
+		this.onboardingDetail = null;
+		try {
+			await this.#postEndorsedRoot();
+			await this.refresh();
+		} catch (err) {
+			if (err instanceof ScribeApiError && err.status === 409) {
+				this.onboarding = 'reset-required';
+				this.onboardingDetail =
+					'a different root is already pinned to this log — reset your identity to re-root';
+			} else {
+				// A refused or failed gesture stays on the reconfirm card.
+				this.onboarding = 'reconfirm';
+				this.onboardingDetail = String(err);
+			}
+		} finally {
+			this.activating = false;
+		}
+	}
+
+	/**
+	 * Post root + session key + endorsement (ADR-0064 §3 pin-or-rotate; the
+	 * DO's copy is display-only since ADR-0065). An existing UNEXPIRED
+	 * endorsement is re-posted as-is even if it is lapsing — the next turn's
+	 * click re-endorses it. An absent or expired one needs an assertion
+	 * gesture: with `prompt: false` (mount — every WebAuthn prompt must
+	 * follow a click) that throws {@link GestureRequiredError} instead, and
+	 * the `reconfirm` card's button retries with the gesture allowed.
+	 */
+	async #postEndorsedRoot(opts: { force?: boolean; prompt?: boolean } = {}): Promise<void> {
 		const rootHex = await this.#passkey!.publicKeyXYHex();
 		if (!rootHex) throw new Error('no passkey record to post');
 		const sessionXY = await this.#userRoot.publicKeyXY();
 		let current = opts.force ? null : await this.#passkey!.currentEndorsement(sessionXY);
-		if (!current || endorsementPhase(current.notAfter, Date.now()) === 'expired')
+		if (!current || endorsementPhase(current.notAfter, Date.now()) === 'expired') {
+			if (opts.prompt === false) throw new GestureRequiredError();
 			current = await this.#passkey!.ensureEndorsement(sessionXY, { force: opts.force });
+		}
 		await postUserRoot(this.#session.sub!, await this.#session.ensure(), rootHex, {
 			sessionPublicKeyXY: await this.#userRoot.publicKeyXYHex(),
 			endorsementB64: current.endorsementB64
