@@ -29,12 +29,25 @@ export interface EnvelopeClaims {
  * verify nowhere. Registered AS-IS as the user's own leaf in separate mode;
  * the DO verifies it against the pinned root and derives
  * workId = SHA-256(envelope) either way.
+ *
+ * Under passkey custody (ADR-0065 §2) the passkey's session-key endorsement
+ * is attached at unprotected -65801 BEFORE signing, so the leaf that
+ * registers carries its own admission evidence; under 4a custody nothing is
+ * attached.
  */
-export function buildUserEnvelope(claims: EnvelopeClaims, root: UserRootKey): Promise<Uint8Array> {
-	return buildUserEnvelopeEs256(claims, {
-		publicKeyXY: () => root.publicKeyXY(),
-		sign: (bytes) => root.sign(bytes)
-	});
+export function buildUserEnvelope(
+	claims: EnvelopeClaims,
+	root: UserRootKey,
+	endorsement: Uint8Array | null = null
+): Promise<Uint8Array> {
+	return buildUserEnvelopeEs256(
+		claims,
+		{
+			publicKeyXY: () => root.publicKeyXY(),
+			sign: (bytes) => root.sign(bytes)
+		},
+		endorsement ? { endorsement } : undefined
+	);
 }
 
 /** workId = SHA-256(envelope) — the turn's identity everywhere (plan §7). */

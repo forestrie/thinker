@@ -9,7 +9,9 @@ import { describe, expect, it } from 'vitest';
 import { base64UrlEncode } from '@forestrie/encoding';
 import { normalizeEs256SignatureLowS } from '@forestrie/delegation-cose';
 import type { WebauthnAssertionResult } from '@forestrie/think-scribe/forestrie/delegate';
-import { captureGolden, type CaptureIdentity } from './goldens.ts';
+import { extractLeafEndorsement } from '@forestrie/think-scribe/forestrie/passkey';
+import { bytesToHex } from './utils.ts';
+import { captureEndorsementGolden, captureGolden, type CaptureIdentity } from './goldens.ts';
 
 const FLAG_UP = 0x01;
 const FLAG_UV = 0x04;
@@ -88,5 +90,34 @@ describe('captureGolden (5.1 harness)', () => {
 		expect(golden.certificate.rootKid.length).toBe(32);
 		expect(Number(golden.onchain.challengeIndex)).toBeGreaterThan(0);
 		expect(Number(golden.onchain.typeIndex)).toBeGreaterThan(0);
+	});
+});
+
+describe('captureEndorsementGolden (plan-2608-14 3.4 → 1.3 fixture)', () => {
+	it('captures a self-verified v2 endorsement and an endorsed leaf carrying it at -65801', async () => {
+		const golden = await captureEndorsementGolden(await syntheticIdentity());
+
+		expect(golden.alg).toBe('ES256_WEBAUTHN');
+		expect(golden.contentType).toBe('application/vnd.forestrie.session-key-endorsement.v2+cbor');
+		// Fixed window — the same family as receipt-verify's endorsed-leaf fixture.
+		expect(golden.notBefore).toBe('1790000000000');
+		expect(golden.notAfter).toBe('1790604800000');
+		expect(golden.rootX.length).toBe(64);
+		expect(golden.sessionX.length).toBe(64);
+		expect(golden.sessionY.length).toBe(64);
+
+		// The endorsement's challenge binds its own Sig_structure.
+		const client = new TextDecoder().decode(
+			Uint8Array.from(golden.endorsement.clientDataJSON.match(/../g)!.map((h) => parseInt(h, 16)))
+		);
+		expect(client).toContain(`"challenge":"${golden.endorsement.challengeB64u}"`);
+		expect(golden.endorsement.signature.length).toBe(128);
+
+		// The leaf: kid = session x, and the -65801 entry IS the endorsement.
+		expect(golden.leaf.kid).toBe(golden.sessionX);
+		const leaf = Uint8Array.from(golden.leaf.coseSign1.match(/../g)!.map((h) => parseInt(h, 16)));
+		const extracted = extractLeafEndorsement(leaf);
+		if (extracted.kind !== 'ok') throw new Error('leaf carries no endorsement');
+		expect(bytesToHex(extracted.endorsement)).toBe(golden.endorsement.coseSign1);
 	});
 });

@@ -14,10 +14,14 @@
 export {
 	assembleSessionKeyEndorsement,
 	buildSessionKeyEndorsementTbs,
+	checkEndorsementWindow,
+	DEFAULT_ENDORSEMENT_WINDOW_MS,
+	extractLeafEndorsement,
 	SESSION_KEY_ENDORSEMENT_CONTENT_TYPE,
 	verifySessionKeyEndorsement
 } from '@forestrie/receipt-verify';
 export type {
+	EndorsementWindow,
 	SessionKeyEndorsementTbs,
 	SessionKeyEndorsementVerifyResult,
 	VerifySessionKeyEndorsementOptions
