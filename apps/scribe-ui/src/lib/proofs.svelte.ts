@@ -435,9 +435,9 @@ export class ProofPanel implements EndorsementProvider {
 				this.onboarding = 'error';
 				this.onboardingDetail = String(err);
 			});
-		// Buy the user grant if a payment-gated lane parked a challenge (W4b).
-		// Fire-and-forget: single-flight inside, and it refreshes on success.
-		if (this.payment !== 'error') void this.ensureUserGrantPaid();
+		// A parked x402 challenge (W4b) is NOT paid here: money moves only on an
+		// explicit gesture — the setup card's "Approve payment" or the
+		// out-of-turns "Add more turns", both of which call ensureUserGrantPaid.
 		this.#schedulePoll();
 	}
 
