@@ -158,6 +158,17 @@
 		{:else}
 			<p class="text-xs text-kumo-subtle">USDC on Base Sepolia — test money for now.</p>
 		{/if}
+		<!-- Circle's official faucet: permissionless, captcha-only, 20 USDC per
+		     address every 2h on Base Sepolia — and x402 settlement pays the
+		     gas, so faucet USDC alone funds a completely fresh wallet. -->
+		<a
+			href="https://faucet.circle.com"
+			target="_blank"
+			rel="noreferrer"
+			class="text-xs font-medium text-kumo-brand hover:underline"
+		>
+			Need test USDC? Get some free
+		</a>
 		<div class="mt-0.5 flex items-center gap-1.5">
 			<span class="size-1.5 rounded-full bg-kumo-success"></span>
 			<span class="size-1.5 rounded-full bg-kumo-brand"></span>

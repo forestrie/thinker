@@ -89,6 +89,14 @@
 				USDC on Base Sepolia — test money. Fund this address to add turns{payment
 					? ` ($${payment.usdc.toFixed(2)} per batch)`
 					: ''}.
+				<a
+					href="https://faucet.circle.com"
+					target="_blank"
+					rel="noreferrer"
+					class="font-medium text-kumo-brand hover:underline"
+				>
+					Get free test USDC
+				</a>
 			</p>
 			<p class="rounded-md bg-kumo-recessed px-2 py-1.5 font-mono text-[10px] break-all select-all">
 				{wallet.address}
