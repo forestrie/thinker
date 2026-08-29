@@ -50,9 +50,9 @@ import {
 	COSE_ALG_ES256,
 	EnvelopeError,
 	userEnvelopeAlg,
-	verifyAttestedInput,
-	verifyAttestedInputEs256
+	verifyAttestedInput
 } from './forestrie/envelope.ts';
+import { EndorsementAdmissionError, admitAttestedInputEs256 } from './forestrie/admission.ts';
 import {
 	buildWorkStatementPayload,
 	newSaltHex,
@@ -67,7 +67,8 @@ import {
 	workIndexKey
 } from './retention.ts';
 import { isPermittedClientFrame } from './ws-frames.ts';
-import { verifySessionKeyEndorsement } from '@forestrie/receipt-verify';
+import { checkEndorsementWindow, verifySessionKeyEndorsement } from '@forestrie/receipt-verify';
+import { ENDORSEMENT_NOT_BEFORE_SKEW_MS } from './forestrie/admission.ts';
 
 /**
  * Bindings the Scribe needs from its hosting Worker. The app's generated
@@ -831,7 +832,7 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 		principal: string
 	): Promise<{ workId: string; accepted: boolean; status: string }> {
 		const envelope = decodeBase64(envelopeB64);
-		// ‼️ verifyAttestedInput / verifyAttestedInputEs256, never the bare
+		// ‼️ verifyAttestedInput / admitAttestedInputEs256, never the bare
 		// envelope verifiers: this is where the signature is bound to the text
 		// the model is about to be fed. It throws before anything is spent or
 		// stored. Principal binding differs by custody shape: a KS256 envelope
@@ -840,17 +841,25 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 		// session-authenticated user pinned via POST /user-root.
 		let verified: { workId: string; input: string };
 		if (userEnvelopeAlg(envelope) === COSE_ALG_ES256) {
-			// Under passkey custody (4.1) the leaf signer is the endorsed
-			// SESSION key, not the root; under 4a they are the same key. The
-			// envelope profile is identical either way (kid = signer x).
-			const leafXYHex =
-				(await this.ctx.storage.get<string>(USER_SESSION_XY_KEY)) ??
-				(await this.ctx.storage.get<string>(USER_ROOT_XY_KEY));
-			if (!leafXYHex)
+			// ADR-0065 §4 pre-flight, mirroring canopy admission exactly: the
+			// signer is resolved from the envelope's OWN bytes against the
+			// pinned root — no -65801 ⇒ the root itself (4a); -65801 ⇒ the
+			// endorsement must verify under the root (UV per this deployment's
+			// policy, which must match the grant flag), sit inside its window
+			// now, and the leaf verifies under the endorsed session key. The
+			// pinned session key is NOT consulted here: under passkey custody a
+			// bare session-signed leaf has kid ≠ root x and is refused, which
+			// is precisely what canopy would do (the 2026-08-29 5.2 failure).
+			const rootXYHex = await this.ctx.storage.get<string>(USER_ROOT_XY_KEY);
+			if (!rootXYHex)
 				throw new EnvelopeError(
 					'no user root key on record for this instance — register it via POST /user-root first'
 				);
-			verified = await verifyAttestedInputEs256(envelope, input, hexToBytes(leafXYHex));
+			verified = await admitAttestedInputEs256(envelope, input, {
+				rootPublicKeyXY: hexToBytes(rootXYHex),
+				requireUserVerification: this.env.USER_ROOT_REQUIRE_UV !== 'false',
+				clock: { nowMs: Date.now() }
+			});
 		} else {
 			const ks256 = await verifyAttestedInput(envelope, input);
 			if (ks256.address.toLowerCase() !== principal.toLowerCase())
@@ -1131,7 +1140,15 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 		}
 	}
 
-	/** Register the user's envelope as its own leaf under grant_user. */
+	/**
+	 * Register the user's envelope as its own leaf under grant_user. The
+	 * bytes are forwarded EXACTLY as the browser posted them
+	 * (`record.envelopeB64`, stored verbatim at admission): under passkey
+	 * custody the envelope carries its own -65801 endorsement, and canopy
+	 * resolves the signer from those bytes (ADR-0065 §2/§4) — re-encoding or
+	 * stripping anything here would change the content hash and the
+	 * admission outcome.
+	 */
 	async #registerUserLeaf(
 		record: WorkRecord,
 		grantB64: string
@@ -1627,6 +1644,10 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 				const admitted = await this.admitAttestedTurn(body.envelopeB64, body.input, principal);
 				return Response.json({ principal, ...admitted });
 			} catch (err) {
+				// An endorsement refusal is canopy's 403 vocabulary (ADR-0065 §4),
+				// surfaced before the turn is spent so the browser can re-endorse.
+				if (err instanceof EndorsementAdmissionError)
+					return Response.json({ error: err.message, reason: err.reason }, { status: 403 });
 				if (err instanceof EnvelopeError) return new Response(err.message, { status: 400 });
 				if (err instanceof CapExceeded)
 					// 429, not 402: a daily cap is not a top-up the wallet can pay off
@@ -1708,9 +1729,11 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 					// Phase 4a: the pinned root (hex x‖y) — the trust anchor an
 					// offline verifier needs (the KS256 shape's anchor was the
 					// principal address, which travels anyway). Under passkey
-					// custody (4.1) this names the PASSKEY, and the session key +
-					// endorsement below complete the offline chain
-					// root → endorsement → leaves (ADR-0064 §4).
+					// custody (4.1) this names the PASSKEY. The session key +
+					// endorsement below are DISPLAY-ONLY since ADR-0065: every
+					// endorsed leaf carries its own endorsement at -65801, and
+					// offline verification (`verifyEndorsedLeaf`) reads it from the
+					// statement bytes — never from this export.
 					userRootPublicKeyXY: (await this.ctx.storage.get<string>(USER_ROOT_XY_KEY)) ?? null,
 					userSessionPublicKeyXY: (await this.ctx.storage.get<string>(USER_SESSION_XY_KEY)) ?? null,
 					userRootEndorsementB64:
@@ -1826,8 +1849,21 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 					{ x: rootXY.slice(0, 32), y: rootXY.slice(32, 64), curve: 'P-256' },
 					{ requireUserVerification: this.env.USER_ROOT_REQUIRE_UV !== 'false' }
 				);
+				// v2 only (ADR-0065 §3): receipt-verify ≥1.0 rejects the window-less
+				// v1 artifact outright (`wrong_content_type`), so a pre-ADR-0065
+				// browser cannot pin a session key here.
 				if (!result.ok)
 					return new Response(`session-key endorsement did not verify: ${result.reason}`, {
+						status: 400
+					});
+				// The window must contain now (canopy's notBefore skew) — an
+				// endorsement that would already be refused at admission must not
+				// be pinned as the instance's custody record.
+				const window = checkEndorsementWindow(result, Date.now(), {
+					skewMs: ENDORSEMENT_NOT_BEFORE_SKEW_MS
+				});
+				if (!window.ok)
+					return new Response(`session-key endorsement window refused: ${window.reason}`, {
 						status: 400
 					});
 				// The signed payload is authoritative; the posted hex must agree.
@@ -1835,8 +1871,11 @@ export class Scribe<Env extends ScribeEnv = ScribeEnv> extends Think<Env> {
 					return new Response('sessionPublicKeyXY does not match the key the endorsement signs', {
 						status: 400
 					});
-				// Pin-or-rotate: a fresh valid endorsement under the pinned root
-				// re-pins the session key (rotation = one gesture, ADR-0064 §3).
+				// Pin-or-rotate / re-endorse: a fresh valid endorsement under the
+				// pinned root re-pins the session key (rotation = one gesture,
+				// ADR-0064 §3) or refreshes the window (ADR-0065 §3). Since
+				// ADR-0065 the stored copy is for `/receipts` display only —
+				// admission resolves the signer from each leaf's own -65801 entry.
 				await this.ctx.storage.put(USER_SESSION_XY_KEY, sessionHex);
 				await this.ctx.storage.put(USER_ROOT_ENDORSEMENT_KEY, endorsementB64);
 			}

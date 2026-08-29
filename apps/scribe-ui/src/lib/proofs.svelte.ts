@@ -24,12 +24,14 @@ import {
 	type WorkExportWire
 } from './scribe-api.ts';
 import { bootRegistration } from './custody.ts';
+import { endorsementPhase } from './endorsement.ts';
+import type { EndorsementProvider } from './chat.svelte.ts';
 import type { ScribeSession } from './session.svelte.ts';
 import type { DemoWallet } from './wallet.svelte.ts';
 import type { UserRootKey } from './user-root.ts';
 import { PasskeyRoot } from './passkey.ts';
 import type { TurnVault } from './vault.svelte.ts';
-import { hexToBytes } from './utils.ts';
+import { bytesToHex as bytesToHexLocal, hexToBytes } from './utils.ts';
 
 /** Sequencing is seconds; sealing minutes — poll gently while in flight. */
 const POLL_MS = 6000;
@@ -52,7 +54,7 @@ function inFlight(work: WorkExportWire): boolean {
  * export being audited: the agent key from `GET /identity` at session
  * start, the user's root key from the browser's own custody (Phase 4a).
  */
-export class ProofPanel {
+export class ProofPanel implements EndorsementProvider {
 	#session: ScribeSession;
 	#wallet: DemoWallet;
 	#userRoot: UserRootKey;
@@ -83,6 +85,16 @@ export class ProofPanel {
 	custody = $state<'passkey' | 'session' | null>(null);
 	/** True while the activation ceremony's gestures are in flight. */
 	activating = $state(false);
+	/**
+	 * When the passkey's endorsement of this browser's signing key lapses
+	 * (unix ms, ADR-0065 §3) — the countdown next to the sealing lease. Null
+	 * under 4a custody or before the first endorsement.
+	 */
+	endorsementExpiresAt = $state<number | null>(null);
+	/** True while an explicit re-endorsement gesture is in flight. */
+	reendorsing = $state(false);
+	/** The endorsement the DO last saw — re-posted when it changes. */
+	#postedEndorsementB64: string | null = null;
 
 	delegation = $state<'idle' | 'working' | 'done' | 'error'>('idle');
 	delegationDetail = $state<string | null>(null);
@@ -220,19 +232,67 @@ export class ProofPanel {
 		}
 	}
 
-	async #postEndorsedRoot(): Promise<void> {
+	/**
+	 * Post root + session key + endorsement (ADR-0064 §3 pin-or-rotate; the
+	 * DO's copy is display-only since ADR-0065). At mount there is no user
+	 * activation, so an existing UNEXPIRED endorsement is re-posted as-is even
+	 * if it is lapsing — the next turn's click re-endorses it; only an absent
+	 * or expired one forces the gesture here (and a refused gesture lands in
+	 * `needs-activation`, whose button retries with one).
+	 */
+	async #postEndorsedRoot(opts: { force?: boolean } = {}): Promise<void> {
 		const rootHex = await this.#passkey!.publicKeyXYHex();
 		if (!rootHex) throw new Error('no passkey record to post');
-		const endorsementB64 = await this.#passkey!.ensureEndorsement(
-			await this.#userRoot.publicKeyXY()
-		);
+		const sessionXY = await this.#userRoot.publicKeyXY();
+		let current = opts.force ? null : await this.#passkey!.currentEndorsement(sessionXY);
+		if (!current || endorsementPhase(current.notAfter, Date.now()) === 'expired')
+			current = await this.#passkey!.ensureEndorsement(sessionXY, { force: opts.force });
 		await postUserRoot(this.#session.sub!, await this.#session.ensure(), rootHex, {
 			sessionPublicKeyXY: await this.#userRoot.publicKeyXYHex(),
-			endorsementB64
+			endorsementB64: current.endorsementB64
 		});
+		this.#postedEndorsementB64 = current.endorsementB64;
+		this.endorsementExpiresAt = current.notAfter;
 		this.custody = 'passkey';
 		this.onboarding = 'registered';
 		this.onboardingDetail = null;
+	}
+
+	/**
+	 * {@link EndorsementProvider}: the endorsement each turn carries (ADR-0065
+	 * §2). Under passkey custody this is the passkey's CURRENT endorsement of
+	 * the session key, re-minted (one prompt, riding on the send click) when
+	 * the window is lapsing; a fresh one is also posted to the DO so
+	 * `/receipts` displays what the leaves carry. Null under 4a custody.
+	 */
+	async forTurn(sessionPublicKeyXY: Uint8Array): Promise<Uint8Array | null> {
+		if (this.custody !== 'passkey' || !this.#passkey) return null;
+		const current = await this.#passkey.ensureEndorsement(sessionPublicKeyXY);
+		this.endorsementExpiresAt = current.notAfter;
+		if (current.endorsementB64 !== this.#postedEndorsementB64) {
+			const rootHex = await this.#passkey.publicKeyXYHex();
+			if (rootHex)
+				await postUserRoot(this.#session.sub!, await this.#session.ensure(), rootHex, {
+					sessionPublicKeyXY: bytesToHexLocal(sessionPublicKeyXY),
+					endorsementB64: current.endorsementB64
+				});
+			this.#postedEndorsementB64 = current.endorsementB64;
+		}
+		return current.endorsement;
+	}
+
+	/** The explicit re-endorsement gesture (the countdown's button). */
+	async reendorse(): Promise<void> {
+		if (this.reendorsing || this.custody !== 'passkey') return;
+		this.reendorsing = true;
+		this.onboardingDetail = null;
+		try {
+			await this.#postEndorsedRoot({ force: true });
+		} catch (err) {
+			this.onboardingDetail = String(err);
+		} finally {
+			this.reendorsing = false;
+		}
 	}
 
 	/**
@@ -511,9 +571,11 @@ export class ProofPanel {
 		try {
 			// Trust anchors from the browser's OWN custody, never the export's
 			// claim of them — the same out-of-band provenance rule as the agent
-			// key. Under passkey custody (4.1, ADR-0064) the trust root is the
-			// passkey and the envelope signer is the endorsed session key; under
-			// 4a they are the same WebCrypto key.
+			// key. Under passkey custody the trust root is the passkey; the
+			// envelope signer (the endorsed session key) is resolved from each
+			// statement's OWN -65801 endorsement (ADR-0065 §5) — nothing from
+			// the export, and nothing from this browser's session key, is
+			// trusted for that. Under 4a the root is the WebCrypto key itself.
 			const sessionXY = await this.#userRoot.publicKeyXY();
 			const passkeyXY = await this.#passkeyRootXY();
 			const result = await verifyWorkReceipt(
@@ -522,8 +584,7 @@ export class ProofPanel {
 				// what the user's root key signed a commitment to (D1/D4).
 				{ ...work, input: this.#vault.input(work.workId) ?? undefined },
 				hexToBytes(this.identity.publicKeyXY),
-				passkeyXY ?? sessionXY,
-				sessionXY
+				passkeyXY ?? sessionXY
 			);
 			this.verifications[work.workId] = { ...result, at: Date.now() };
 		} catch (err) {

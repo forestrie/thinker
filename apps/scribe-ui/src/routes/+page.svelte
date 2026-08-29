@@ -30,8 +30,11 @@
 	// The user's own copy of their prompts (D4). Keyed to the wallet: a reset
 	// identity starts with an empty vault, as it should.
 	const vault = new TurnVault(wallet.address);
-	const chat = new ScribeChat(session, userRoot, vault);
 	const proofs = new ProofPanelState(session, wallet, userRoot, vault, passkey);
+	// The proof panel is also the turn's endorsement source (ADR-0065 §2):
+	// under passkey custody every envelope carries the passkey's endorsement
+	// of the session key before the session key signs it.
+	const chat = new ScribeChat(session, userRoot, vault, proofs);
 
 	// A settled turn means new commitments are in flight — pull the export.
 	chat.onTurnSettled = () => void proofs.refresh();

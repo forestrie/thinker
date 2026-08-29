@@ -37,6 +37,18 @@ export interface ChatPart {
 	errorText?: string;
 }
 
+/**
+ * Where a turn's session-key endorsement comes from (ADR-0065 §2). Under
+ * passkey custody the proof panel answers with the passkey's current v2
+ * endorsement of the session key — running the re-endorsement gesture
+ * first when the window is lapsing (the send is a user activation, so the
+ * prompt is allowed). Under 4a custody it answers null and nothing is
+ * attached.
+ */
+export interface EndorsementProvider {
+	forTurn(sessionPublicKeyXY: Uint8Array): Promise<Uint8Array | null>;
+}
+
 export interface ChatMessage {
 	id: string;
 	role: 'user' | 'assistant' | 'system';
@@ -110,6 +122,7 @@ export class ScribeChat {
 	#session: ScribeSession;
 	#userRoot: UserRootKey;
 	#vault: TurnVault;
+	#endorsement: EndorsementProvider | null;
 	#client: AgentClient | null = null;
 	/**
 	 * In-flight streamed assistant messages, keyed by requestId. Private
@@ -133,10 +146,16 @@ export class ScribeChat {
 	/** Fires after a turn completes — the proof panel refreshes on it. */
 	onTurnSettled: (() => void) | null = null;
 
-	constructor(session: ScribeSession, userRoot: UserRootKey, vault: TurnVault) {
+	constructor(
+		session: ScribeSession,
+		userRoot: UserRootKey,
+		vault: TurnVault,
+		endorsement: EndorsementProvider | null = null
+	) {
 		this.#session = session;
 		this.#userRoot = userRoot;
 		this.#vault = vault;
+		this.#endorsement = endorsement;
 	}
 
 	get streamingMessages(): ChatMessage[] {
@@ -375,8 +394,20 @@ export class ScribeChat {
 		this.turnError = null;
 		this.awaiting = true;
 
+		// ADR-0065 §2: under passkey custody the passkey's endorsement of this
+		// session key is attached BEFORE the session key signs — the leaf that
+		// canopy admits is exactly these bytes, endorsement included. A lapsing
+		// window re-endorses here (one passkey prompt, on this click).
+		let endorsement: Uint8Array | null;
+		try {
+			endorsement = (await this.#endorsement?.forTurn(await this.#userRoot.publicKeyXY())) ?? null;
+		} catch (err) {
+			this.turnError = `could not endorse this browser's signing key: ${String(err)}`;
+			this.awaiting = false;
+			throw err;
+		}
 		const claims = newTurnClaims(input, this.sessionId);
-		const envelope = await buildUserEnvelope(claims, this.#userRoot);
+		const envelope = await buildUserEnvelope(claims, this.#userRoot, endorsement);
 		const workId = await workIdOf(envelope);
 		const envelopeB64 = bytesToB64(envelope);
 		this.#vault.keep({ workId, input, envelopeB64, at: Date.now() });
@@ -398,6 +429,10 @@ export class ScribeChat {
 			// up, so do NOT point at the proof panel.
 			if (err instanceof ScribeApiError && err.status === 402) {
 				this.turnError = 'Prepaid turns exhausted — top up in the proof panel to continue.';
+			} else if (err instanceof ScribeApiError && err.status === 403) {
+				// The DO's ADR-0065 §4 pre-flight (mirroring canopy) refused the
+				// endorsement — the proof panel's re-endorse button is the fix.
+				this.turnError = `Your passkey's endorsement of this browser's signing key was refused (${err.message}) — re-endorse it in the proof panel.`;
 			} else if (err instanceof ScribeApiError && err.status === 429) {
 				this.turnError =
 					'Daily demo-turn cap reached — this shared demo is rate-limited today. Please try again tomorrow.';

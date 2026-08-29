@@ -6,6 +6,11 @@ import {
 } from '@forestrie/think-scribe/forestrie/passkey';
 import type { WebauthnAssertionResult } from '@forestrie/think-scribe/forestrie/delegate';
 import { bytesToB64, bytesToHex } from './utils.ts';
+import {
+	DEFAULT_ENDORSEMENT_WINDOW_MS,
+	needsReendorsement,
+	newEndorsementWindow
+} from './endorsement.ts';
 
 const DB_NAME = 'scribe-passkey';
 const STORE = 'keys';
@@ -17,14 +22,34 @@ interface PasskeyRecord {
 	/** The passkey's 64-byte P-256 x‖y — the user's LOG ROOT (grantData). */
 	publicKeyXY: Uint8Array;
 	/**
-	 * The cached session-key endorsement (ADR-0064): ONE onboarding gesture,
-	 * ever — the artifact is durable by design (offline verifiers hold it
-	 * forever via /receipts), so re-posting it costs nothing. Re-endorsement
-	 * happens only when the session key it names changes (rotation).
+	 * The cached v2 session-key endorsement (ADR-0065 §3): the passkey's
+	 * signature over the session key FOR A WINDOW. It rides inside every
+	 * per-turn leaf (unprotected -65801), so the cache is what gets attached
+	 * — re-endorsement (one gesture) happens when the session key changes
+	 * (rotation) or the window nears lapse. A record without a window is a
+	 * pre-ADR-0065 (v1) artifact and is treated as absent.
 	 */
 	endorsementB64?: string;
 	/** Hex x‖y of the session key the cached endorsement signs. */
 	endorsedSessionXYHex?: string;
+	/** The cached endorsement's window, unix ms inclusive (v2 only). */
+	endorsementNotBefore?: number;
+	endorsementNotAfter?: number;
+}
+
+export interface PasskeyRootOptions {
+	/** Endorsement window length; default 7 days (ADR-0065 §3). */
+	endorsementWindowMs?: number;
+	/** Clock (injected for tests). */
+	now?: () => number;
+}
+
+/** A cached endorsement and the window it is valid for. */
+export interface CurrentEndorsement {
+	endorsement: Uint8Array;
+	endorsementB64: string;
+	notBefore: number;
+	notAfter: number;
 }
 
 /**
@@ -37,6 +62,13 @@ interface PasskeyRecord {
 export class PasskeyRoot {
 	#record: PasskeyRecord | null = null;
 	#loading: Promise<PasskeyRecord | null> | null = null;
+	readonly #windowMs: number;
+	readonly #now: () => number;
+
+	constructor(opts: PasskeyRootOptions = {}) {
+		this.#windowMs = opts.endorsementWindowMs ?? DEFAULT_ENDORSEMENT_WINDOW_MS;
+		this.#now = opts.now ?? (() => Date.now());
+	}
 
 	/** WebAuthn availability — the 4.1 feature gate (fall back to 4a). */
 	static supported(): boolean {
@@ -118,37 +150,68 @@ export class PasskeyRoot {
 	}
 
 	/**
-	 * The onboarding endorsement (ADR-0064 §2): the passkey signs the session
-	 * key once, in the ADR-0063 envelope with the typed payload. Cached — the
-	 * gesture repeats only when the session key changes.
+	 * The cached endorsement for `sessionPublicKeyXY`, if it names that key
+	 * and carries a v2 window — regardless of whether the window still has
+	 * runway (callers decide via `endorsement.ts`). Never prompts.
 	 */
-	async ensureEndorsement(sessionPublicKeyXY: Uint8Array): Promise<string> {
+	async currentEndorsement(sessionPublicKeyXY: Uint8Array): Promise<CurrentEndorsement | null> {
+		const record = await this.ensure();
+		if (!record?.endorsementB64) return null;
+		if (record.endorsedSessionXYHex !== bytesToHex(sessionPublicKeyXY)) return null;
+		if (
+			typeof record.endorsementNotBefore !== 'number' ||
+			typeof record.endorsementNotAfter !== 'number'
+		)
+			return null; // v1 (window-less) — ADR-0065 §3: rejected everywhere, re-endorse.
+		return {
+			endorsement: b64ToBytes(record.endorsementB64),
+			endorsementB64: record.endorsementB64,
+			notBefore: record.endorsementNotBefore,
+			notAfter: record.endorsementNotAfter
+		};
+	}
+
+	/**
+	 * The session-key endorsement (ADR-0065 §3): the passkey signs the session
+	 * key for a validity window, in the ADR-0063 envelope with the v2 typed
+	 * payload. Cached — the gesture repeats when the session key changes or
+	 * the window nears lapse (`needsReendorsement`), or when `force` is set
+	 * (the explicit "re-endorse now" button). Must run from a user activation
+	 * when a gesture is due.
+	 */
+	async ensureEndorsement(
+		sessionPublicKeyXY: Uint8Array,
+		opts: { force?: boolean } = {}
+	): Promise<CurrentEndorsement> {
 		const record = await this.ensure();
 		if (!record) throw new Error('no passkey available');
-		const sessionHex = bytesToHex(sessionPublicKeyXY);
-		if (record.endorsementB64 && record.endorsedSessionXYHex === sessionHex)
-			return record.endorsementB64;
+		const now = this.#now();
+		const current = await this.currentEndorsement(sessionPublicKeyXY);
+		if (current && !opts.force && !needsReendorsement(current.notAfter, now)) return current;
 
+		const window = newEndorsementWindow(now, this.#windowMs);
 		const tbs = buildSessionKeyEndorsementTbs({
 			rootPublicKeyX: record.publicKeyXY.slice(0, 32),
-			sessionPublicKeyXY
+			sessionPublicKeyXY,
+			...window
 		});
 		const challenge = new Uint8Array(
 			await crypto.subtle.digest('SHA-256', tbs.sigStructureBytes as BufferSource)
 		);
 		const assertion = await this.getAssertion(challenge);
-		const endorsementB64 = bytesToB64(
-			assembleSessionKeyEndorsement({
-				tbs,
-				authenticatorData: assertion.authenticatorData,
-				clientDataJSON: assertion.clientDataJSON,
-				signature: assertion.signature
-			})
-		);
+		const endorsement = assembleSessionKeyEndorsement({
+			tbs,
+			authenticatorData: assertion.authenticatorData,
+			clientDataJSON: assertion.clientDataJSON,
+			signature: assertion.signature
+		});
+		const endorsementB64 = bytesToB64(endorsement);
 		record.endorsementB64 = endorsementB64;
-		record.endorsedSessionXYHex = sessionHex;
+		record.endorsedSessionXYHex = bytesToHex(sessionPublicKeyXY);
+		record.endorsementNotBefore = window.notBefore;
+		record.endorsementNotAfter = window.notAfter;
 		await idbPut(record);
-		return endorsementB64;
+		return { endorsement, endorsementB64, ...window };
 	}
 
 	/**
@@ -165,6 +228,13 @@ export class PasskeyRoot {
 			// reset is followed by a wallet reset (new DO instance).
 		}
 	}
+}
+
+function b64ToBytes(b64: string): Uint8Array {
+	const bin = atob(b64);
+	const out = new Uint8Array(bin.length);
+	for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+	return out;
 }
 
 async function createPasskey(): Promise<PasskeyRecord | null> {

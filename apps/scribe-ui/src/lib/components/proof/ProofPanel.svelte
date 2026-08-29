@@ -1,6 +1,7 @@
 <script lang="ts">
 	import type { ProofPanel } from '$lib/proofs.svelte.ts';
 	import { leasePhase, leaseRemainingLabel } from '$lib/lease.ts';
+	import { endorsementPhase, endorsementRemainingLabel } from '$lib/endorsement.ts';
 	import { shortHex } from '$lib/utils.ts';
 	import Card from '$lib/components/ui/Card.svelte';
 	import Badge from '$lib/components/ui/Badge.svelte';
@@ -100,6 +101,8 @@
 		{@const activated = proofs.sealingDelegated}
 		{@const lease = activated ? leasePhase(proofs.sealingLeaseExpiresAt, now) : 'unknown'}
 		{@const leaseUrgent = lease === 'expiring' || lease === 'expired'}
+		{@const endorsement =
+			proofs.custody === 'passkey' ? endorsementPhase(proofs.endorsementExpiresAt, now) : 'unknown'}
 		<Card title="Activate your log">
 			<div class="space-y-2 p-4 text-xs">
 				{#if proofs.onboarding === 'needs-activation'}
@@ -138,8 +141,9 @@
 					</div>
 					<p class="text-kumo-subtle">
 						Two prompts now — create the passkey, then endorse this browser's per-turn signing key
-						(one gesture, ever). Continuing without one is one-way: upgrading to a passkey later
-						means resetting your identity and starting a fresh log.
+						for a week (the endorsement rides inside every leaf you sign; one prompt renews it).
+						Continuing without one is one-way: upgrading to a passkey later means resetting your
+						identity and starting a fresh log.
 					</p>
 					{#if proofs.onboardingDetail}
 						<p class="text-kumo-danger">{proofs.onboardingDetail}</p>
@@ -206,6 +210,57 @@
 						<p class={proofs.delegation === 'error' ? 'text-kumo-danger' : 'text-kumo-subtle'}>
 							{proofs.delegationDetail}
 						</p>
+					{/if}
+
+					<!-- ADR-0065 §3: the passkey's endorsement of this browser's
+					     signing key is a WINDOW (7 days) that canopy admission and
+					     every offline verifier enforce — surface it like the lease.
+					     A lapsing endorsement renews itself on the next send (one
+					     prompt); this button does it now. -->
+					{#if proofs.custody === 'passkey'}
+						<div class="flex flex-wrap items-center gap-2 border-t border-kumo-line pt-2">
+							<Fingerprint class="size-3.5 text-kumo-subtle" />
+							{#if endorsement === 'unknown'}
+								<span class="text-kumo-subtle">
+									signing-key endorsement: window not recorded — your next message re-endorses (one
+									passkey prompt)
+								</span>
+							{:else if endorsement === 'expired'}
+								<Badge tone="danger">endorsement expired</Badge>
+								<span class="text-kumo-danger">
+									your next message re-endorses this browser's signing key (one passkey prompt)
+								</span>
+							{:else if endorsement === 'expiring'}
+								<Badge tone="warning">
+									endorsement lapses in {endorsementRemainingLabel(
+										proofs.endorsementExpiresAt!,
+										now
+									)}
+								</Badge>
+								<span class="text-kumo-subtle"
+									>renews on your next message (one passkey prompt)</span
+								>
+							{:else}
+								<span class="text-kumo-default">
+									signing-key endorsement: {endorsementRemainingLabel(
+										proofs.endorsementExpiresAt!,
+										now
+									)} left
+								</span>
+							{/if}
+							<Button
+								size="sm"
+								variant="ghost"
+								disabled={proofs.reendorsing}
+								title="Have your passkey endorse this browser's signing key for a fresh 7-day window — one prompt"
+								onclick={() => proofs.reendorse()}
+							>
+								{#if proofs.reendorsing}
+									<LoaderCircle class="size-3.5 animate-spin" />
+								{/if}
+								Re-endorse now
+							</Button>
+						</div>
 					{/if}
 
 					<!-- The sealing authorization is a LEASE (~6h on this lane), by

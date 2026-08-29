@@ -3,7 +3,9 @@
 // every receipted work unit with the log absent:
 //
 //   user-envelope       the user's signature over their input COMMITMENT —
-//                       ES256 under the export's browser root key (Phase 4a)
+//                       ES256 under the export's user root key (Phase 4a) or,
+//                       under passkey custody, under the session key the
+//                       leaf's OWN -65801 endorsement names (ADR-0065) —
 //                       or legacy KS256 recovered against the wcc-1 principal
 //   statement-signature the agent's ES256 COSE Sign1 over the work statement
 //   receipt             inclusion proof + sealed checkpoint + delegation cert
@@ -13,7 +15,10 @@
 //                       envelope's H(nonce ‖ input) commitment
 //   user-leaf-*         (O4 separate mode, M5) the envelope's OWN leaf on the
 //                       user's log: KS256 delegation cert under the wallet →
-//                       coverage window → sealer signature → inclusion
+//                       coverage window → sealer signature → inclusion; or,
+//                       for an endorsed leaf, receipt-verify's single rung
+//                       root → endorsement → session key → leaf → window vs
+//                       the receipted idtimestamp → inclusion (ADR-0065 §5)
 //   transcript-binding  H(salt ‖ the DO's currently-claimed output) = committed
 //                       outputHash — the check the tamper beat breaks
 //
@@ -35,16 +40,17 @@
 // Node >= 22.18 (imports the repo's TypeScript sources via type stripping).
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import {
-	resolveEndorsedSessionKey,
-	verifyWorkReceipt
-} from '../packages/think-scribe/src/forestrie/receipt.ts';
+import { verifyWorkReceipt } from '../packages/think-scribe/src/forestrie/receipt.ts';
 import {
 	COSE_ALG_ES256,
 	userEnvelopeAlg,
 	verifyUserEnvelope,
 	verifyUserEnvelopeEs256
 } from '../packages/think-scribe/src/forestrie/envelope.ts';
+import {
+	EndorsementAdmissionError,
+	resolveEnvelopeSigner
+} from '../packages/think-scribe/src/forestrie/admission.ts';
 
 function die(msg) {
 	console.error(`verify-receipts: ${msg}`);
@@ -137,41 +143,41 @@ for (const work of works) {
 
 	const checks = [];
 
-	// Passkey custody (Phase 4.1, ADR-0064): the exported root is the
-	// passkey, and per-turn envelopes are signed by the SESSION key the
-	// exported endorsement names. Walk the rung: verify the endorsement under
-	// the root, then verify envelopes under the endorsed key. A broken
-	// endorsement fails the chain — never a silent fall-back to the root.
-	let userEnvelopeXY = userRootXY;
-	const endorsementB64 =
-		typeof exported.forestrie?.userRootEndorsementB64 === 'string'
-			? exported.forestrie.userRootEndorsementB64
-			: null;
-	if (userRootXY && endorsementB64) {
-		try {
-			userEnvelopeXY = await resolveEndorsedSessionKey(userRootXY, endorsementB64);
-			checks.push({
-				name: 'session-endorsement',
-				ok: true,
-				detail: `passkey root endorses session key x ${Buffer.from(userEnvelopeXY.slice(0, 8)).toString('hex')}…`
-			});
-		} catch (err) {
-			checks.push({ name: 'session-endorsement', ok: false, detail: String(err) });
-			userEnvelopeXY = null;
-		}
-	}
+	// Passkey custody (ADR-0065): the exported root is the passkey, and each
+	// per-turn envelope carries the passkey's endorsement of its SESSION key
+	// at -65801. The signer chain is resolved from the LEAF BYTES — the
+	// export's `userRootEndorsementB64` is display only and is never read
+	// here. A broken endorsement fails the chain; there is no fall-back to
+	// verifying a session-signed leaf under the root. The endorsement window
+	// is checked in the user-leaf rung against the receipted idtimestamp.
 	try {
 		const envelope = Uint8Array.from(Buffer.from(work.envelopeB64, 'base64'));
 		if (userEnvelopeAlg(envelope) === COSE_ALG_ES256) {
-			// ES256 shape: no signer recovery — verify under the exported key
-			// (the endorsed session key under passkey custody, else the root).
-			if (!userEnvelopeXY)
-				throw new Error('ES256 envelope but the export carries no verifiable user key');
-			const verified = await verifyUserEnvelopeEs256(envelope, userEnvelopeXY);
+			if (!userRootXY)
+				throw new Error('ES256 envelope but the export carries no 64-byte user root key');
+			let signer;
+			try {
+				signer = await resolveEnvelopeSigner(envelope, {
+					rootPublicKeyXY: userRootXY,
+					requireUserVerification: false,
+					clock: 'receipt-rung'
+				});
+			} catch (err) {
+				if (err instanceof EndorsementAdmissionError)
+					checks.push({ name: 'session-endorsement', ok: false, detail: err.reason });
+				throw err;
+			}
+			if (signer.kind === 'endorsed')
+				checks.push({
+					name: 'session-endorsement',
+					ok: true,
+					detail: `leaf carries the passkey root's endorsement of session key x ${Buffer.from(signer.signerPublicKeyXY.slice(0, 8)).toString('hex')}… (window ${new Date(signer.notBefore).toISOString()} → ${new Date(signer.notAfter).toISOString()})`
+				});
+			const verified = await verifyUserEnvelopeEs256(envelope, signer.signerPublicKeyXY);
 			checks.push({
 				name: 'user-envelope',
 				ok: true,
-				detail: `signed by user key x ${verified.kidHex.slice(0, 16)}…`
+				detail: `signed by ${signer.kind === 'endorsed' ? 'endorsed session' : 'user root'} key x ${verified.kidHex.slice(0, 16)}…`
 			});
 		} else {
 			const verified = await verifyUserEnvelope(envelope);
@@ -190,12 +196,7 @@ for (const work of works) {
 		checks.push({ name: 'user-envelope', ok: false, detail: String(err) });
 	}
 
-	const result = await verifyWorkReceipt(
-		work,
-		trustKey,
-		userRootXY ?? principalAddress,
-		userEnvelopeXY
-	);
+	const result = await verifyWorkReceipt(work, trustKey, userRootXY ?? principalAddress);
 	checks.push(...result.checks);
 
 	const ok = checks.every((c) => c.ok);

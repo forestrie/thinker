@@ -21,9 +21,19 @@ import {
 	type SignWebauthnAssertion
 } from '@forestrie/think-scribe/forestrie/delegate';
 import {
+	assembleSessionKeyEndorsement,
+	buildSessionKeyEndorsementTbs,
+	extractLeafEndorsement,
+	SESSION_KEY_ENDORSEMENT_CONTENT_TYPE,
 	spkiToPublicKeyXY,
+	verifySessionKeyEndorsement,
 	webauthnSignatureToP1363LowS
 } from '@forestrie/think-scribe/forestrie/passkey';
+import {
+	buildUserEnvelopeEs256,
+	inputCommitment,
+	verifyUserEnvelopeEs256
+} from '@forestrie/think-scribe/forestrie/envelope';
 import {
 	assembleWebauthnDelegationAlgData,
 	decodeWebauthnDelegationAlgData,
@@ -363,6 +373,155 @@ export async function captureGolden(identity: CaptureIdentity): Promise<GoldenCa
 			authenticatorData: bytesToHex(certAuthData),
 			clientDataJSON: bytesToHex(certClientData),
 			signature: bytesToHex(cert.signature)
+		}
+	};
+}
+
+// --- v2 session-key endorsement golden (plan-2608-14 3.4 → 1.3) -------------
+
+/**
+ * Fixed 7-day window (unix ms) — the same family as receipt-verify's
+ * endorsed-leaf fixture, so the golden slots straight into that suite and
+ * canopy-api's admission specs with a leaf time of 1_790_300_000_000.
+ */
+const GOLDEN_WINDOW = { notBefore: 1_790_000_000_000, notAfter: 1_790_604_800_000 };
+const GOLDEN_NONCE = '00112233445566778899aabbccddeeff';
+const GOLDEN_INPUT = 'golden: what is a transparency log?';
+
+/** The golden JSON — hex fields unprefixed, numbers as decimal strings. */
+export interface EndorsementGoldenCapture {
+	description: string;
+	capturedAt: string;
+	origin: string;
+	rpId: string;
+	authenticator: string;
+	alg: 'ES256_WEBAUTHN';
+	contentType: string;
+	rootX: string;
+	rootY: string;
+	sessionX: string;
+	sessionY: string;
+	notBefore: string;
+	notAfter: string;
+	endorsement: {
+		coseSign1: string;
+		protectedHeader: string;
+		payload: string;
+		sigStructure: string;
+		challengeB64u: string;
+		authenticatorData: string;
+		clientDataJSON: string;
+		signature: string;
+	};
+	/** A per-turn envelope signed by the session key, carrying the endorsement at -65801. */
+	leaf: {
+		coseSign1: string;
+		kid: string;
+		claims: { inputHash: string; sessionId: string; issuedAt: string; nonce: string };
+		input: string;
+	};
+}
+
+/**
+ * Capture a REAL-authenticator v2 session-key endorsement (ADR-0065 §3) —
+ * ONE gesture — over a throwaway session key, verify it under the root with
+ * UV enforced, then sign a golden per-turn leaf with that session key
+ * carrying the endorsement at -65801 and verify the leaf under the session
+ * key. Throws if either fails: an unverifiable golden must never download.
+ */
+export async function captureEndorsementGolden(
+	identity: CaptureIdentity
+): Promise<EndorsementGoldenCapture> {
+	const rootX = identity.rootPublicKeyXY.slice(0, 32);
+	const rootY = identity.rootPublicKeyXY.slice(32, 64);
+
+	// A real (throwaway) P-256 session key: verifiers import it, so the
+	// payload must name an actual point.
+	const session = (await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, [
+		'sign',
+		'verify'
+	])) as CryptoKeyPair;
+	const sessionXY = new Uint8Array(
+		(await crypto.subtle.exportKey('raw', session.publicKey)) as ArrayBuffer
+	).slice(1, 65);
+
+	const tbs = buildSessionKeyEndorsementTbs({
+		rootPublicKeyX: rootX,
+		sessionPublicKeyXY: sessionXY,
+		...GOLDEN_WINDOW
+	});
+	const challenge = await sha256(tbs.sigStructureBytes);
+	const assertion = await identity.getAssertion(challenge);
+	const endorsement = assembleSessionKeyEndorsement({ tbs, ...assertion });
+	const verified = await verifySessionKeyEndorsement(
+		endorsement,
+		{ x: rootX, y: rootY, curve: 'P-256' },
+		{ requireUserVerification: true }
+	);
+	if (!verified.ok)
+		throw new Error(
+			`endorsement failed verification under the root (UV required): ${verified.reason}`
+		);
+
+	const claims = {
+		inputHash: inputCommitment(GOLDEN_NONCE, GOLDEN_INPUT),
+		sessionId: '10111213-1415-1617-1819-1a1b1c1d1e1f',
+		issuedAt: '2026-09-21T12:53:20.000Z', // inside the fixed window
+		nonce: GOLDEN_NONCE
+	};
+	const leaf = await buildUserEnvelopeEs256(
+		claims,
+		{
+			publicKeyXY: () => Promise.resolve(sessionXY),
+			sign: async (bytes) =>
+				new Uint8Array(
+					await crypto.subtle.sign(
+						{ name: 'ECDSA', hash: 'SHA-256' },
+						session.privateKey,
+						bytes as BufferSource
+					)
+				)
+		},
+		{ endorsement }
+	);
+	const leafVerified = await verifyUserEnvelopeEs256(leaf, verified.sessionPublicKeyXY);
+	const extracted = extractLeafEndorsement(leaf);
+	if (extracted.kind !== 'ok' || bytesToHex(extracted.endorsement) !== bytesToHex(endorsement))
+		throw new Error('golden leaf does not carry the endorsement at -65801');
+
+	return {
+		description:
+			'Real-authenticator v2 session-key endorsement golden (devdocs ADR-0065 §3, plan-2608-14 3.4/1.3). ' +
+			'Captured via scribe-ui /goldens with one passkey gesture over a throwaway session key; ' +
+			'the leaf is the canonical thinker per-turn envelope signed by that session key with the ' +
+			'endorsement at unprotected -65801. Window matches receipt-verify endorsed-leaf-fixture.',
+		capturedAt: new Date().toISOString(),
+		origin: identity.origin,
+		rpId: identity.rpId,
+		authenticator: identity.authenticator,
+		alg: 'ES256_WEBAUTHN',
+		contentType: SESSION_KEY_ENDORSEMENT_CONTENT_TYPE,
+		rootX: bytesToHex(rootX),
+		rootY: bytesToHex(rootY),
+		sessionX: bytesToHex(sessionXY.slice(0, 32)),
+		sessionY: bytesToHex(sessionXY.slice(32, 64)),
+		notBefore: String(GOLDEN_WINDOW.notBefore),
+		notAfter: String(GOLDEN_WINDOW.notAfter),
+		endorsement: {
+			coseSign1: bytesToHex(endorsement),
+			protectedHeader: bytesToHex(tbs.protectedBstr),
+			payload: bytesToHex(tbs.payloadBstr),
+			sigStructure: bytesToHex(tbs.sigStructureBytes),
+			challengeB64u: base64UrlEncode(challenge),
+			authenticatorData: bytesToHex(assertion.authenticatorData),
+			clientDataJSON: bytesToHex(assertion.clientDataJSON),
+			signature: bytesToHex(assertion.signature)
+		},
+		leaf: {
+			coseSign1: bytesToHex(leaf),
+			kid: leafVerified.kidHex,
+			claims,
+			input: GOLDEN_INPUT
 		}
 	};
 }

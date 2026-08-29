@@ -23,10 +23,11 @@ import {
 	importEs256PublicKeyFromGrantDataXy64,
 	parseReceipt,
 	univocityLeafHash,
+	verifyEndorsedLeaf,
 	verifyGrantReceiptOfflineWithKeys,
-	verifyReceiptOfflineWithKeys,
-	verifySessionKeyEndorsement
+	verifyReceiptOfflineWithKeys
 } from '@forestrie/receipt-verify';
+import { EndorsementAdmissionError, resolveEnvelopeSigner } from './admission.ts';
 import {
 	PAYLOAD_DELEGATED_KEY,
 	decodeDelegatedCoseKeyFromBytes,
@@ -40,6 +41,7 @@ import { cborDecode, cborEncode, type CborMap } from './cbor.ts';
 import { outputCommitment, sha256Hex } from '../attestation.ts';
 import {
 	COSE_ALG_ES256,
+	envelopeEndorsement,
 	inputCommitment,
 	userEnvelopeAlg,
 	verifyUserEnvelope,
@@ -204,17 +206,13 @@ export async function verifyWorkReceipt(
 	agentPublicKeyXY: Uint8Array,
 	/**
 	 * Trust root for the user leaf (O4): the 20-byte wallet address (KS256
-	 * shape) or, since Phase 4a, the 64-byte P-256 x‖y of the browser-held
-	 * root key (ES256 shape). Length selects the verification rung.
+	 * shape) or, since Phase 4a, the 64-byte P-256 x‖y of the user's log
+	 * root (ES256 shape) — under passkey custody the PASSKEY. Length selects
+	 * the verification rung. Under passkey custody the envelope signer (the
+	 * endorsed session key) is resolved from the envelope's OWN -65801
+	 * endorsement (ADR-0065 §5), never from the export.
 	 */
-	userTrustRoot?: Uint8Array | null,
-	/**
-	 * Leaf-envelope signer under passkey custody (Phase 4.1, ADR-0064): the
-	 * endorsed 64-byte session key — resolve it from the export's
-	 * endorsement via {@link resolveEndorsedSessionKey}. Defaults to
-	 * `userTrustRoot` (4a: the root IS the envelope signer).
-	 */
-	userEnvelopeKey?: Uint8Array | null
+	userTrustRoot?: Uint8Array | null
 ): Promise<WorkVerifyResult> {
 	const checks: WorkCheck[] = [];
 	const fail = (name: string, detail: string): WorkVerifyResult => {
@@ -302,14 +300,25 @@ export async function verifyWorkReceipt(
 			let signerDetail: string;
 			if (userEnvelopeAlg(envelope) === COSE_ALG_ES256) {
 				// ES256 shape (Phase 4a): no signer recovery — verify under the
-				// caller-trusted key. Under passkey custody (4.1) the signer is
-				// the endorsed session key, not the root.
-				const envelopeKey = userEnvelopeKey ?? userTrustRoot;
-				if (!envelopeKey || envelopeKey.length !== 64)
-					throw new ReceiptError('ES256 envelope needs a 64-byte user key as trust anchor');
-				const verified = await verifyUserEnvelopeEs256(envelope, envelopeKey);
+				// caller-trusted root. Under passkey custody the envelope carries
+				// its endorsement (ADR-0065): the signer chain root → endorsement
+				// → session key is resolved from the bytes, and a broken
+				// endorsement fails here rather than falling back to the root.
+				// The window is the receipt rung's job (against the receipted
+				// idtimestamp), not a wall-clock check.
+				if (!userTrustRoot || userTrustRoot.length !== 64)
+					throw new ReceiptError('ES256 envelope needs the 64-byte user root as trust anchor');
+				const signer = await resolveEnvelopeSigner(envelope, {
+					rootPublicKeyXY: userTrustRoot,
+					requireUserVerification: false,
+					clock: 'receipt-rung'
+				});
+				const verified = await verifyUserEnvelopeEs256(envelope, signer.signerPublicKeyXY);
 				claims = verified.claims;
-				signerDetail = `signer x ${verified.kidHex.slice(0, 16)}…`;
+				signerDetail =
+					signer.kind === 'endorsed'
+						? `endorsed session key x ${verified.kidHex.slice(0, 16)}… (passkey root endorsement inside the leaf)`
+						: `signer x ${verified.kidHex.slice(0, 16)}…`;
 			} else {
 				const verified = await verifyUserEnvelope(envelope);
 				claims = verified.claims;
@@ -324,7 +333,14 @@ export async function verifyWorkReceipt(
 					: 'the supplied text does NOT open the commitment the user key signed'
 			});
 		} catch (err) {
-			checks.push({ name: 'input-binding', ok: false, detail: String(err) });
+			checks.push({
+				name: 'input-binding',
+				ok: false,
+				detail:
+					err instanceof EndorsementAdmissionError
+						? `session-key endorsement inside the leaf refused: ${err.reason}`
+						: String(err)
+			});
 		}
 	}
 
@@ -524,6 +540,13 @@ function subtleHasher(): Hasher {
  * key (64-byte x‖y trust root). That shape needs no special rung at all —
  * receipt-verify's standard ES256 delegation resolution applies, exactly as
  * for the agent leaf, with the envelope as the payload.
+ *
+ * Under passkey custody (ADR-0065) the envelope carries the passkey's
+ * session-key endorsement at -65801, and the rung is receipt-verify's
+ * `verifyEndorsedLeaf` — the SINGLE offline path: root → endorsement (inside
+ * the leaf) → session key → leaf → window vs the receipted idtimestamp →
+ * inclusion of the exact bytes. Nothing here verifies a session-signed leaf
+ * under the root, and nothing reads an endorsement from the export.
  */
 export async function verifyUserLeafReceipt(
 	envelopeB64: string,
@@ -555,6 +578,38 @@ export async function verifyUserLeafReceipt(
 	// agent leaf — inclusion + checkpoint + delegation certificate under the
 	// root key, with the envelope bytes as the leaf payload.
 	if (userTrustRoot.length === 64) {
+		const envelope = decodeBase64(envelopeB64);
+		let endorsed: boolean;
+		try {
+			endorsed = envelopeEndorsement(envelope) !== null;
+		} catch (err) {
+			return fail('user-leaf-endorsed', `endorsement: endorsement_invalid (${err})`);
+		}
+		if (endorsed) {
+			try {
+				// UV is not required here: an offline verifier has no grant flag
+				// in evidence (canopy enforced it at admission, ADR-0065 §4).
+				const result = await verifyEndorsedLeaf(
+					{
+						rootPublicKeyXY: userTrustRoot,
+						statementCbor: envelope,
+						receiptCbor: decodeBase64(userLeaf.receiptB64),
+						idtimestampBe8: entryIdHexToIdtimestampBe8(userLeaf.entryId)
+					},
+					{ requireUserVerification: false }
+				);
+				checks.push({
+					name: 'user-leaf-endorsed',
+					ok: result.ok,
+					detail: result.ok
+						? `entry ${userLeaf.entryId} — passkey root endorses session key x ${[...result.sessionPublicKeyXY.slice(0, 8)].map((b) => b.toString(16).padStart(2, '0')).join('')}…, leaf at ${new Date(result.leafIdtimestampMs).toISOString()} inside [${new Date(result.notBefore).toISOString()}, ${new Date(result.notAfter).toISOString()}]`
+						: `${result.stage}: ${result.reason}`
+				});
+			} catch (err) {
+				checks.push({ name: 'user-leaf-endorsed', ok: false, detail: String(err) });
+			}
+			return { ok: checks.every((c) => c.ok), checks };
+		}
 		try {
 			const result = await verifyReceiptOfflineWithKeys({
 				receiptCbor: decodeBase64(userLeaf.receiptB64),
@@ -698,29 +753,4 @@ export async function verifyUserLeafReceipt(
 	});
 
 	return { ok: checks.every((c) => c.ok), checks };
-}
-
-/**
- * Resolve the endorsed session key from a receipts export under passkey
- * custody (Phase 4.1, ADR-0064): verify the exported endorsement under the
- * passkey root and return the 64-byte session key the leaves verify under.
- * Throws {@link ReceiptError} when the endorsement does not verify — a
- * broken endorsement must fail the chain, never fall back to the root.
- *
- * UV is not required here: an offline verifier has no deployment config in
- * evidence (the DO enforced its own policy at onboarding, ADR-0064 §3).
- */
-export async function resolveEndorsedSessionKey(
-	rootPublicKeyXY: Uint8Array,
-	endorsementB64: string
-): Promise<Uint8Array> {
-	if (rootPublicKeyXY.length !== 64) throw new ReceiptError('passkey root must be 64 bytes x‖y');
-	const result = await verifySessionKeyEndorsement(decodeBase64(endorsementB64), {
-		x: rootPublicKeyXY.slice(0, 32),
-		y: rootPublicKeyXY.slice(32, 64),
-		curve: 'P-256'
-	});
-	if (!result.ok)
-		throw new ReceiptError(`session-key endorsement did not verify: ${result.reason}`);
-	return result.sessionPublicKeyXY;
 }

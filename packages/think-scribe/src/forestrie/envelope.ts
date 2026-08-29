@@ -41,9 +41,18 @@
  * WebCrypto P-256 key rather than the wallet — the custody shape the WebAuthn
  * ceremony (Phase 4.1+) builds on. The KS256 profile stays for wallet-rooted
  * logs and the smoke harnesses.
+ *
+ * Under passkey custody (ADR-0065, plan-2608-14) the ES256 envelope is signed
+ * by the endorsed SESSION key and carries the passkey's v2 session-key
+ * endorsement in its UNPROTECTED header at label -65801
+ * ({@link COSE_LABEL_SESSION_KEY_ENDORSEMENT}) — attached by the browser
+ * BEFORE signing, so the registered leaf is self-describing: canopy
+ * admission and any offline auditor resolve the signer from the leaf's own
+ * bytes, and nothing verifies a session-signed leaf under the root.
  */
 import { keccak_256 } from '@noble/hashes/sha3.js';
 import { secp256k1 } from '@noble/curves/secp256k1.js';
+import { COSE_LABEL_SESSION_KEY_ENDORSEMENT } from '@forestrie/encoding';
 import { cborDecode, cborEncode, type CborMap } from './cbor.ts';
 import { saltedCommitmentHex } from '../attestation.ts';
 
@@ -52,6 +61,7 @@ const CONTENT_TYPE = 3;
 const KID = 4;
 export const COSE_ALG_KS256 = -65799;
 export const COSE_ALG_ES256 = -7;
+export { COSE_LABEL_SESSION_KEY_ENDORSEMENT };
 
 /**
  * Maximum user input, in UTF-8 bytes. Matches the demo's per-entry retention
@@ -258,10 +268,27 @@ export async function verifyUserEnvelope(envelope: Uint8Array): Promise<Verified
 	return { claims, address: `0x${hexOf(recoveredAddress)}`, workId };
 }
 
-/** Build an ES256 envelope with the user's P-256 root key (Phase 4a). */
+export interface BuildUserEnvelopeEs256Options {
+	/**
+	 * Passkey custody (ADR-0065 §2): the v2 session-key endorsement bytes to
+	 * carry at unprotected label -65801. `signer` is then the endorsed SESSION
+	 * key. Omit under 4a custody (the signer IS the root) — nothing is
+	 * attached, and canopy binds the leaf to `grantData` as before.
+	 */
+	endorsement?: Uint8Array;
+}
+
+/**
+ * Build an ES256 envelope with the user's P-256 key (Phase 4a), optionally
+ * carrying the session-key endorsement (ADR-0065). The unprotected header is
+ * outside the Sig_structure, so the endorsement does not change what the
+ * session key signs — but it is committed by the leaf's content hash once
+ * registered, so it cannot be swapped after the fact either (§5).
+ */
 export async function buildUserEnvelopeEs256(
 	claims: EnvelopeClaims,
-	signer: Es256EnvelopeSigner
+	signer: Es256EnvelopeSigner,
+	opts?: BuildUserEnvelopeEs256Options
 ): Promise<Uint8Array> {
 	const publicKeyXY = await signer.publicKeyXY();
 	if (publicKeyXY.length !== 64) throw new EnvelopeError('root public key must be 64 bytes x‖y');
@@ -273,10 +300,41 @@ export async function buildUserEnvelopeEs256(
 	protectedMap.set(KID, publicKeyXY.slice(0, 32));
 	const protectedBytes = cborEncode(protectedMap);
 
+	const unprotected: CborMap = new Map();
+	if (opts?.endorsement !== undefined) {
+		if (!(opts.endorsement instanceof Uint8Array) || opts.endorsement.length === 0)
+			throw new EnvelopeError('session-key endorsement must be a non-empty byte string');
+		unprotected.set(COSE_LABEL_SESSION_KEY_ENDORSEMENT, opts.endorsement);
+	}
+
 	const signature = await signer.sign(sigStructure(protectedBytes, payload));
 	if (signature.length !== 64)
 		throw new EnvelopeError('ES256 signature must be 64 bytes P1363 r‖s');
-	return cborEncode([protectedBytes, new Map(), payload, signature]);
+	return cborEncode([protectedBytes, unprotected, payload, signature]);
+}
+
+/**
+ * The session-key endorsement an envelope carries at unprotected -65801, or
+ * null when absent. Throws {@link EnvelopeError} on an entry that is present
+ * but not a byte string — present-but-unusable is never "absent" (ADR-0065
+ * §4: no fallback to the root binding).
+ */
+export function envelopeEndorsement(envelope: Uint8Array): Uint8Array | null {
+	let decoded;
+	try {
+		decoded = cborDecode(envelope);
+	} catch (err) {
+		throw new EnvelopeError(`envelope is not decodable CBOR: ${err}`);
+	}
+	if (!Array.isArray(decoded) || decoded.length !== 4)
+		throw new EnvelopeError('envelope is not a COSE Sign1 4-array');
+	const unprotected = decoded[1];
+	if (!(unprotected instanceof Map)) return null;
+	const entry = unprotected.get(COSE_LABEL_SESSION_KEY_ENDORSEMENT);
+	if (entry === undefined) return null;
+	if (!(entry instanceof Uint8Array) || entry.length === 0)
+		throw new EnvelopeError('session-key endorsement (-65801) must be a non-empty byte string');
+	return entry;
 }
 
 /**
