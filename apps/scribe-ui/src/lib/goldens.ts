@@ -491,7 +491,7 @@ export async function captureEndorsementGolden(
 
 	return {
 		description:
-			'Real-authenticator v2 session-key endorsement golden (devdocs ADR-0065 §3, plan-2608-14 3.4/1.3). ' +
+			'Real-authenticator v2 session-key endorsement golden (ADR-0065 §3, plan-2608-14 3.4/1.3). ' +
 			'Captured via scribe-ui /goldens with one passkey gesture over a throwaway session key; ' +
 			'the leaf is the canonical thinker per-turn envelope signed by that session key with the ' +
 			'endorsement at unprotected -65801. Window matches receipt-verify endorsed-leaf-fixture.',
