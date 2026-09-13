@@ -5,9 +5,18 @@ that produces a tamper-evident, externally verifiable record of a conversation.
 The user attests to their input; the agent attests to its own choices and
 outputs. Both are committed to a pre-provisioned Forestrie log via SCRAPI.
 
-Plan of record: `devdocs/plans/plan-2608-08-cf-think-demo/thinker.md` (in the
-forestrie devdocs repo). This repo is **external to canopy** — the agent is a
-registrant/writer against canopy's public APIs, never a sealer.
+Public, MIT — see [LICENSE](./LICENSE). This repo is **external to canopy**:
+the agent is a registrant/writer against canopy's public APIs, never a sealer,
+and everything it needs is public (the `@forestrie/*` packages on npm and the
+SCRAPI endpoints any outside client can reach).
+
+Plan of record: `plan-2608-08-cf-think-demo/thinker.md` in the forestrie
+devdocs repo (private, cited by name). The normative documents this code cites
+by bare id — ADR-0064, ADR-0065, ARC-0019, the receipt trust model and the
+conformance vectors — are public in
+[forestrie/protocol](https://github.com/forestrie/protocol); other ids
+(ADR-0008, ADR-0052, ADR-0063, ARC-0010, ARC-0023, ARC-0029 and the
+`plan-26nn-nn` ids) stay private and are cited by name only.
 
 **What is this, really?** [SCRIBE.md](./SCRIBE.md) — the user-facing
 functionality and value, and the Forestrie features the demo exercises,

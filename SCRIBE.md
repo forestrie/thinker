@@ -3,7 +3,8 @@
 Two views of the same demo: what a **user** gets out of it, and which
 **Forestrie** capabilities it exercises underneath. For build/run/milestone
 detail see the [README](./README.md); the plan of record is
-`devdocs/plans/plan-2608-08-cf-think-demo/thinker.md`.
+`plan-2608-08-cf-think-demo/thinker.md` in the forestrie devdocs repo
+(private, cited by name).
 
 ## User-facing: what it does and why it matters
 
