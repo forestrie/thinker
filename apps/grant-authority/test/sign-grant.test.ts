@@ -19,7 +19,22 @@
 import { describe, expect, it } from 'vitest';
 import { createPrivateKey, generateKeyPairSync } from 'node:crypto';
 import { signGrantPayloadWithEs256Pem } from '@forestrie/grant-builder';
+import { coseUnprotectedToMap, decodeCoseSign1 } from '@forestrie/encoding';
 import { grantSigStructure, importAuthorityKey, signGrantPayload } from '../src/sign-grant.ts';
+
+/**
+ * Offsets of the two unprotected-map key encodings within a signed Sign1 —
+ * a small local helper, not a CBOR decode, so a canonical-order regression
+ * shows up as a plain integer comparison (FOR-568).
+ */
+const CBOR_KEY_IDTIMESTAMP_HEX = '3a00010000'; // -65537
+const CBOR_KEY_FORESTRIE_GRANT_V0_HEX = '3a00010001'; // -65538
+
+function keyOffset(signedHex: string, keyHex: string): number {
+	const offset = signedHex.indexOf(keyHex);
+	expect(offset).toBeGreaterThan(-1);
+	return offset;
+}
 
 /** A P-256 keypair as both a PKCS#8 PEM (Node path) and a JWK (Worker path). */
 function keyMaterial() {
@@ -51,8 +66,8 @@ const SIGNATURE_FIELD_BYTES = 66;
 
 const hex = (b: Uint8Array) => [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
 
-describe('wire framing matches @forestrie/grant-builder byte for byte', () => {
-	it('agrees on everything outside the signature', async () => {
+describe('wire framing matches @forestrie/grant-builder', () => {
+	it('agrees on framing content outside the signature (order aside)', async () => {
 		const { pem, jwk } = keyMaterial();
 		const { privateKey } = await importAuthorityKey(jwk);
 
@@ -60,8 +75,37 @@ describe('wire framing matches @forestrie/grant-builder byte for byte', () => {
 		const fromWorker = await signGrantPayload(GRANT_PAYLOAD, privateKey);
 
 		expect(fromWorker.length).toBe(fromNode.length);
-		expect(hex(fromWorker.subarray(0, -SIGNATURE_FIELD_BYTES))).toBe(
-			hex(fromNode.subarray(0, -SIGNATURE_FIELD_BYTES))
+
+		const nodeDecoded = decodeCoseSign1(fromNode);
+		const workerDecoded = decodeCoseSign1(fromWorker);
+		expect(nodeDecoded).not.toBeNull();
+		expect(workerDecoded).not.toBeNull();
+
+		expect(hex(workerDecoded!.protectedBstr)).toBe(hex(nodeDecoded!.protectedBstr));
+		expect(hex(workerDecoded!.payloadBstr)).toBe(hex(nodeDecoded!.payloadBstr));
+
+		// Same two unprotected entries on both sides — this implementation emits
+		// them in canonical order (see the "canonical key order" test below);
+		// @forestrie/grant-builder 0.4.0 (the vendored Node reference) still
+		// emits the pre-fix (non-canonical) order until canopy#255 publishes
+		// 0.5.0 (see the module doc in ../src/sign-grant.ts), so order itself
+		// is deliberately not compared here.
+		const nodeMap = coseUnprotectedToMap(nodeDecoded!.unprotected);
+		const workerMap = coseUnprotectedToMap(workerDecoded!.unprotected);
+		expect(hex(workerMap.get(-65538) as Uint8Array)).toBe(hex(nodeMap.get(-65538) as Uint8Array));
+		expect(hex(workerMap.get(-65537) as Uint8Array)).toBe(hex(nodeMap.get(-65537) as Uint8Array));
+	});
+
+	it('emits the unprotected map in canonical (bytewise, RFC 8949 §4.2.1) key order — FOR-568', async () => {
+		const { jwk } = keyMaterial();
+		const { privateKey } = await importAuthorityKey(jwk);
+		const signed = await signGrantPayload(GRANT_PAYLOAD, privateKey);
+		const signedHex = hex(signed);
+
+		// -65537 (idtimestamp) sorts before -65538 (grant v0 CBOR); canopy's
+		// decoder (@forestrie/encoding 0.8.0, canopy#255) rejects the reverse.
+		expect(keyOffset(signedHex, CBOR_KEY_IDTIMESTAMP_HEX)).toBeLessThan(
+			keyOffset(signedHex, CBOR_KEY_FORESTRIE_GRANT_V0_HEX)
 		);
 	});
 
