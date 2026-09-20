@@ -12,14 +12,18 @@
  *   - payload = 32-byte SHA-256 of the grant v0 CBOR
  *   - signature = ECDSA P-256 over SHA-256(CBOR(["Signature1", protected, h'',
  *     payload])), raw IEEE P1363 r‖s (64 bytes)
- *   - unprotected header carries the grant v0 CBOR (-65538) and an 8-byte zero
- *     idtimestamp (-65537)
+ *   - unprotected header carries an 8-byte zero idtimestamp (-65537) and the
+ *     grant v0 CBOR (-65538), in that (canonical, RFC 8949 §4.2.1) key order
  *
- * The wire output is byte-identical to the Node version except for the 64
- * signature bytes, which cannot match: ECDSA draws a random `k`, so no two
- * signings agree even on one implementation. `test/sign-grant.test.ts` proves
- * the equivalence the right way — identical framing, and both signatures verify
- * under the same public key.
+ * The wire output matches the Node version's framing except for two things:
+ * the 64 signature bytes, which cannot match (ECDSA draws a random `k`, so no
+ * two signings agree even on one implementation), and — until
+ * `@forestrie/grant-builder` 0.5.0 publishes (canopy#255) — the unprotected
+ * key order, since the currently-pinned 0.4.0 Node reference still emits the
+ * pre-fix (non-canonical) order. `test/sign-grant.test.ts` proves the
+ * equivalence the right way — identical framing content, canonical order on
+ * this implementation's own output, and both signatures verify under the same
+ * public key.
  *
  * WebCrypto's ECDSA sign already emits raw r‖s, so no DER unwrapping is needed;
  * that is exactly what `dsaEncoding: "ieee-p1363"` asks Node for.
@@ -80,10 +84,12 @@ export async function signGrantPayload(
 	const out: number[] = [0x84]; // Sign1 array(4)
 	appendCborBstr(out, ES256_PROTECTED_HEADER);
 	out.push(0xa2); // unprotected map(2)
-	out.push(...CBOR_KEY_FORESTRIE_GRANT_V0);
-	appendCborBstr(out, grantPayloadBytes);
+	// Canonical key order (RFC 8949 §4.2.1; canopy's decoder rejects any other
+	// from `@forestrie/encoding` 0.8.0): -65537 sorts before -65538.
 	out.push(...CBOR_KEY_IDTIMESTAMP);
 	appendCborBstr(out, new Uint8Array(IDTIMESTAMP_BYTES));
+	out.push(...CBOR_KEY_FORESTRIE_GRANT_V0);
+	appendCborBstr(out, grantPayloadBytes);
 	appendCborBstr(out, payload);
 	appendCborBstr(out, signature);
 	return new Uint8Array(out);
