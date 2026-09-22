@@ -15,8 +15,8 @@ importers:
         specifier: ^10.0.1
         version: 10.0.1(eslint@10.8.1(jiti@2.7.0))
       '@forestrie/encoding':
-        specifier: ^0.7.0
-        version: 0.7.0
+        specifier: ^0.9.0
+        version: 0.9.0
       '@forestrie/grant-builder':
         specifier: ^0.4.0
         version: 0.4.0
@@ -54,8 +54,8 @@ importers:
   apps/grant-authority:
     dependencies:
       '@forestrie/encoding':
-        specifier: ^0.8.0
-        version: 0.8.0
+        specifier: ^0.9.0
+        version: 0.9.0
       '@forestrie/grant-builder':
         specifier: ^0.5.0
         version: 0.5.0
@@ -88,8 +88,8 @@ importers:
         specifier: ^0.3.0
         version: 0.3.0
       '@forestrie/encoding':
-        specifier: ^0.7.0
-        version: 0.7.0
+        specifier: ^0.9.0
+        version: 0.9.0
       '@forestrie/think-scribe':
         specifier: workspace:*
         version: link:../../packages/think-scribe
@@ -192,14 +192,14 @@ importers:
         specifier: ^0.3.0
         version: 0.3.0
       '@forestrie/encoding':
-        specifier: ^0.8.0
-        version: 0.8.0
+        specifier: ^0.9.0
+        version: 0.9.0
       '@forestrie/merklelog':
-        specifier: ^0.4.0
-        version: 0.4.0
+        specifier: ^0.5.0
+        version: 0.5.0
       '@forestrie/receipt-verify':
-        specifier: ^2.0.0
-        version: 2.0.0
+        specifier: ^2.2.0
+        version: 2.2.0
       '@noble/curves':
         specifier: ^2.3.0
         version: 2.3.0
@@ -896,11 +896,11 @@ packages:
   '@forestrie/encoding@0.6.0':
     resolution: {integrity: sha512-REzdL++f/XBKxtrjMLEv/IrW2XDcviIRHLd48L3jVSZBTsma3E6isFPivpJSI/BRZdNFVGQjj+phLs+wpueebA==}
 
-  '@forestrie/encoding@0.7.0':
-    resolution: {integrity: sha512-3Q8s678bQa8J0RBv92jAjwQE0OTqV9vP8YxASoCB9LQt7VKQ1pxl6h0SvUlggY3RMEvBBLNBcXduh7Szx5r2DA==}
-
   '@forestrie/encoding@0.8.0':
     resolution: {integrity: sha512-2UquoDJj0CcCMA4dN2CQabMqWbU3/hyTnQqEKGvrG1jZJqOiJ78owq9LkcmLLWtQQ68q/oC72dxnp0EhwSSfew==}
+
+  '@forestrie/encoding@0.9.0':
+    resolution: {integrity: sha512-XAoZDFCi4C6y1KwNE8dldqaJ/NFWZymOxGuhdw/e3Fs6NvoMuW7WR53DAYqriehCYuRsSiXKqb/EeCyxyQzMrg==}
 
   '@forestrie/grant-builder@0.4.0':
     resolution: {integrity: sha512-lHuIUUQpjDmhx498GpxiyHjZrsx6DbWOn943Qf1BgTsyLFHtfAzQmKtzWcwuNLrTBFGR5UXmtKJxqiBpiYLHDA==}
@@ -908,11 +908,11 @@ packages:
   '@forestrie/grant-builder@0.5.0':
     resolution: {integrity: sha512-TK99asMGFUaG4mrj4OCeR+WqkOH7S4iWAa6wp2SsCk+2KV+3bVsJgiSdagzlMNjEtE6jdoJNYRVUUpLw/epabg==}
 
-  '@forestrie/merklelog@0.4.0':
-    resolution: {integrity: sha512-ShFyIfzNwQUCYzL2ytEe1CIyoYsBuNBMF1heLtQyXtf5cgBebCEjiOxJnwJSpo3jd9j/Em8GHTLu2JphfqY1GA==}
+  '@forestrie/merklelog@0.5.0':
+    resolution: {integrity: sha512-oV5geJutday8LDPRUuVQYsE+C8VE4O5anhx0s1QI8cOmJDlZzdTaQTa7gEBQ6zu0EIU1gK04sZrGQd58w8Yw7g==}
 
-  '@forestrie/receipt-verify@2.0.0':
-    resolution: {integrity: sha512-0dD6g6wtv7ep1jqRzeFmtI4HZxQqVNpQuWRr6mscde05UCxXvfGhuU2wF5Lu6P57ZftX1iMLJ+imOJg2JXo2XA==}
+  '@forestrie/receipt-verify@2.2.0':
+    resolution: {integrity: sha512-Zf11Og8qWC/R6QOahK6+SRqpKenxsaODa1ZxLVba3uXrVp7au6IwMfsu8wnur+IvRfdQHntnqythAFz2ZU9Jrw==}
 
   '@forestrie/scrapi-client@0.1.3':
     resolution: {integrity: sha512-ixj/Czux1fpI4VlOfqZqqi8lpbCXs/FFMc35gONZBt/WE+caTlDgZSuAm57nbTQzvZBn+rVkjse4xIxN4+Uq8g==}
@@ -4464,11 +4464,11 @@ snapshots:
     dependencies:
       '@noble/curves': 1.9.7
 
-  '@forestrie/encoding@0.7.0':
+  '@forestrie/encoding@0.8.0':
     dependencies:
       '@noble/curves': 1.9.7
 
-  '@forestrie/encoding@0.8.0':
+  '@forestrie/encoding@0.9.0':
     dependencies:
       '@noble/curves': 1.9.7
 
@@ -4484,13 +4484,13 @@ snapshots:
       '@noble/curves': 1.9.7
       '@noble/hashes': 1.8.0
 
-  '@forestrie/merklelog@0.4.0': {}
+  '@forestrie/merklelog@0.5.0': {}
 
-  '@forestrie/receipt-verify@2.0.0':
+  '@forestrie/receipt-verify@2.2.0':
     dependencies:
       '@forestrie/chain-rpc': 0.3.0
-      '@forestrie/encoding': 0.8.0
-      '@forestrie/merklelog': 0.4.0
+      '@forestrie/encoding': 0.9.0
+      '@forestrie/merklelog': 0.5.0
       '@noble/hashes': 1.8.0
 
   '@forestrie/scrapi-client@0.1.3':
