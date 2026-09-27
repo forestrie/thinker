@@ -170,12 +170,47 @@ async function resolveStanding(
 	const standing = (pending.entries ?? []).find(
 		(e) => e.suggestedTtlSeconds !== undefined && e.mmrStart === undefined
 	);
-	if (!standing)
-		throw new DelegateError(
-			'no standing delegate-key entry for log — register a public root and a sealer delegate key first'
-		);
+	if (!standing) throw await explainMissingStanding(params, fetchImpl);
 	await verifyVoucher(standing, b64ToBytes(params.knownSealerKeyB64));
 	return standing;
+}
+
+/**
+ * Why the coordinator offered no standing entry. The C3 entry is gated on two
+ * facts about the LOG, not the caller (canopy `standingDelegationEntry`): a
+ * public root registered for it (C1) and a live sealer delegate key on the
+ * lane. The sealer key is registered once per lane by the custodian and
+ * outlives any one log, so in practice the missing half is the public root —
+ * a log the coordinator has never heard of (created against a forest that has
+ * since been re-provisioned, or whose root forward never landed). One extra
+ * public GET tells the two apart; on any probe failure the combined message
+ * stands.
+ */
+async function explainMissingStanding(
+	params: DelegateSealingParams,
+	fetchImpl: typeof fetch
+): Promise<DelegateError> {
+	let rootStatus: number | undefined;
+	try {
+		const rootRes = await fetchImpl(
+			`${params.coordinatorUrl}/api/logs/${params.logId}/public-root`
+		);
+		rootStatus = rootRes.status;
+	} catch {
+		rootStatus = undefined;
+	}
+	if (rootStatus === 404)
+		return new DelegateError(
+			`log ${params.logId} is not registered with the coordinator (no public root) — it cannot be delegated; if the forest was re-provisioned this log belongs to the old one and needs a fresh log`,
+			404
+		);
+	if (rootStatus !== undefined && rootStatus >= 200 && rootStatus < 300)
+		return new DelegateError(
+			`log ${params.logId} has a public root but the coordinator has no live sealer delegate key for the lane — the custodian has not registered one yet (or it expired); retry once the sealer is up`
+		);
+	return new DelegateError(
+		'no standing delegate-key entry for log — register a public root and a sealer delegate key first'
+	);
 }
 
 async function submitCertificate(
