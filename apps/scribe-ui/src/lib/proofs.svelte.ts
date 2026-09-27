@@ -825,7 +825,9 @@ export class ProofPanel implements EndorsementProvider {
 			void this.collectNow();
 		} catch (err) {
 			this.delegation = 'error';
-			this.delegationDetail = String(err);
+			// The message alone: DelegateError already says which step failed,
+			// and `String(err)` would only prepend a redundant "Error: ".
+			this.delegationDetail = err instanceof Error ? err.message : String(err);
 		}
 	}
 }
