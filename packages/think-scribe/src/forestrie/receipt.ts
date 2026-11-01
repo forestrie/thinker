@@ -703,8 +703,8 @@ export async function verifyUserLeafReceipt(
 	const leafMmrIndex = parsed.proof.mmrIndex ?? parsed.proof.leafIndex ?? 0n;
 	const window = checkDelegationConstraints(
 		{
-			mmrStart: BigInt(info.mmrStart),
-			mmrEnd: BigInt(info.mmrEnd),
+			mmrStart: info.mmrStart,
+			mmrEnd: info.mmrEnd,
 			issuedAt: info.issuedAt,
 			expiresAt: info.expiresAt
 		},

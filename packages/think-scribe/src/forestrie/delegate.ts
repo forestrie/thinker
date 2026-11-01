@@ -27,6 +27,7 @@ import {
 	buildDelegationCertificateWebauthn,
 	buildOnchainDelegationToBeSignedWebauthn,
 	decodeDelegatedCoseKeyFromBytes,
+	formatDecimalUint64,
 	parseDelegatedCoseKeyFromPayload,
 	parseDelegationCertificate,
 	signOnchainDelegationEs256,
@@ -52,8 +53,12 @@ export type { KeyProvider } from '../keys/provider.ts';
 // same reason as KeyProvider (browser callers import this subpath only).
 export type { SignWebauthnAssertion, WebauthnAssertionResult } from '@forestrie/delegation-cose';
 
-/** Horizon lease default: effectively unbounded (matches the CLI). */
-const DEFAULT_HORIZON_MMR_END = Number.MAX_SAFE_INTEGER;
+/**
+ * Horizon lease default: effectively unbounded (matches the CLI's
+ * Number.MAX_SAFE_INTEGER). A uint64 (FOR-613): the certificate carries the
+ * range as CBOR major type 0 and delegation-cose ≥0.5 takes it as bigint.
+ */
+const DEFAULT_HORIZON_MMR_END = BigInt(Number.MAX_SAFE_INTEGER);
 
 const CLAIM_SEALER_ID = 1;
 const CLAIM_EPOCH = 2;
@@ -72,7 +77,8 @@ export class DelegateError extends Error {
 type StandingEntry = {
 	delegatedPublicKey: string;
 	suggestedTtlSeconds?: number;
-	mmrStart?: number;
+	/** Range-bearing (non-standing) entries only; canonical decimal string. */
+	mmrStart?: string;
 	voucher?: string;
 	sealerId?: string;
 	epoch?: number | string;
@@ -138,14 +144,20 @@ export interface DelegateSealingParams {
 	logId: string;
 	/** Pinned registrar voucher key, base64 x‖y (64 bytes). */
 	knownSealerKeyB64: string;
-	horizonMmrEnd?: number;
+	/** Exclusive MMR end of the horizon lease (uint64; mmrStart is fixed 0). */
+	horizonMmrEnd?: bigint;
 	ttlSeconds?: number;
 }
 
 export interface DelegateSealingResult {
 	sealerId: string;
 	epoch: number | string;
-	mmrEnd: number;
+	/**
+	 * Exclusive MMR end of the lease, as the canonical decimal string the
+	 * coordinator's JSON contract uses: callers spread this
+	 * result into JSON responses, and a JSON number loses precision above 2^53.
+	 */
+	mmrEnd: string;
 	expiresAt: number;
 }
 
@@ -183,8 +195,8 @@ async function submitCertificate(
 	standing: StandingEntry,
 	certificate: Uint8Array,
 	onchainSignature: Uint8Array,
-	mmrStart: number,
-	mmrEnd: number,
+	mmrStart: bigint,
+	mmrEnd: bigint,
 	fetchImpl: typeof fetch,
 	/**
 	 * WebAuthn root only (4.2): the on-chain proof's assertion parts. The
@@ -194,13 +206,15 @@ async function submitCertificate(
 	onchainAssertion?: { authenticatorData: Uint8Array; clientDataJSON: Uint8Array }
 ): Promise<DelegateSealingResult> {
 	const info = parseDelegationCertificate(certificate);
+	// The coordinator's JSON contract carries range bounds as canonical
+	// decimal strings; a JSON number gets 400.
 	const submitRes = await fetchImpl(`${params.coordinatorUrl}/api/delegations/certificate`, {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify({
 			logId: params.logId,
-			mmrStart,
-			mmrEnd,
+			mmrStart: formatDecimalUint64(mmrStart),
+			mmrEnd: formatDecimalUint64(mmrEnd),
 			delegatedPublicKey: standing.delegatedPublicKey,
 			certificate: bytesToB64(certificate),
 			issuedAt: info.issuedAt,
@@ -222,7 +236,7 @@ async function submitCertificate(
 	return {
 		sealerId: standing.sealerId!,
 		epoch: standing.epoch!,
-		mmrEnd,
+		mmrEnd: formatDecimalUint64(mmrEnd),
 		expiresAt: info.expiresAt
 	};
 }
@@ -238,7 +252,7 @@ export async function delegateSealing(
 	const keyPair = await keys.signingKeyPair();
 
 	const standing = await resolveStanding(params, fetchImpl);
-	const mmrStart = 0;
+	const mmrStart = 0n;
 	const mmrEnd = params.horizonMmrEnd ?? DEFAULT_HORIZON_MMR_END;
 	const logIdHex32 = bytesToHex(uuidToBytes(params.logId));
 	const delegatedPublicKeyBytes = b64ToBytes(standing.delegatedPublicKey);
@@ -294,7 +308,7 @@ export async function delegateSealingKs256(
 	if (rootSignerAddress.length !== 20)
 		throw new DelegateError('root signer address must be 20 bytes');
 	const standing = await resolveStanding(params, fetchImpl);
-	const mmrStart = 0;
+	const mmrStart = 0n;
 	const mmrEnd = params.horizonMmrEnd ?? DEFAULT_HORIZON_MMR_END;
 	const logIdHex32 = bytesToHex(uuidToBytes(params.logId));
 	const delegatedPublicKeyBytes = b64ToBytes(standing.delegatedPublicKey);
@@ -360,7 +374,7 @@ export async function delegateSealingWebauthn(
 	if (rootPublicKeyXY.length !== 64)
 		throw new DelegateError('passkey root public key must be 64 bytes x‖y');
 	const standing = await resolveStanding(params, fetchImpl);
-	const mmrStart = 0;
+	const mmrStart = 0n;
 	const mmrEnd = params.horizonMmrEnd ?? DEFAULT_HORIZON_MMR_END;
 	const logIdHex32 = bytesToHex(uuidToBytes(params.logId));
 	const delegatedPublicKeyBytes = b64ToBytes(standing.delegatedPublicKey);
