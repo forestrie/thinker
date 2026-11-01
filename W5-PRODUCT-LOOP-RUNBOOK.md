@@ -1,4 +1,4 @@
-# W5 product-loop validation runbook (plan-2608-09)
+# W5 product-loop validation runbook
 
 Validate the full paid batch-grant loop against the **flipped** canopy lane A
 (`REGISTER_GRANT_ADMISSION=either` live). The canopy gate itself is already
@@ -12,7 +12,7 @@ N+1 refused → top-up restores.
 > Cloudflare via `.github/workflows/deploy.yml` (manual dispatch, `dev` env,
 > `thinker-dev` + `thinker-ui-dev` + `thinker-grant-authority-dev`, pointed at
 > lane A through GitHub Environment vars). Prefer the deployed estate for
-> anything origin-bound — passkeys (plan-2608-13) are rpId-scoped, so a
+> anything origin-bound — passkeys are rpId-scoped, so a
 > `localhost` passkey never transfers to the deployed origin.
 
 ---

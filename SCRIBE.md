@@ -2,9 +2,7 @@
 
 Two views of the same demo: what a **user** gets out of it, and which
 **Forestrie** capabilities it exercises underneath. For build/run/milestone
-detail see the [README](./README.md); the plan of record is
-`plan-2608-08-cf-think-demo/thinker.md` in the forestrie devdocs repo
-(private, cited by name).
+detail see the [README](./README.md).
 
 ## User-facing: what it does and why it matters
 
@@ -61,7 +59,7 @@ statement payload is never stored — only its hash is committed.
 - Every grant carries its own inclusion receipt — credentials are themselves
   transparency-logged.
 
-**Batch payment for work (x402, plan-2608-09):** the user pays **once** for a
+**Batch payment for work (x402):** the user pays **once** for a
 `maxHeight`-bounded _batch_ grant good for N turns, not per message — the 402
 challenge and wallet signature stay entirely off the turn path, so chatting
 runs at normal latency. The requirement is a **parent-grant policy bit**
