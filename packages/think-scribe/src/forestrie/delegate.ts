@@ -27,6 +27,7 @@ import {
 	buildDelegationCertificateWebauthn,
 	buildOnchainDelegationToBeSignedWebauthn,
 	decodeDelegatedCoseKeyFromBytes,
+	formatDecimalUint64,
 	parseDelegatedCoseKeyFromPayload,
 	parseDelegationCertificate,
 	signOnchainDelegationEs256,
@@ -76,7 +77,7 @@ export class DelegateError extends Error {
 type StandingEntry = {
 	delegatedPublicKey: string;
 	suggestedTtlSeconds?: number;
-	/** Range-bearing (non-standing) entries only; canonical decimal string (D1). */
+	/** Range-bearing (non-standing) entries only; canonical decimal string. */
 	mmrStart?: string;
 	voucher?: string;
 	sealerId?: string;
@@ -153,7 +154,7 @@ export interface DelegateSealingResult {
 	epoch: number | string;
 	/**
 	 * Exclusive MMR end of the lease, as the canonical decimal string the
-	 * coordinator's JSON contract uses (plan-2611-01 D1): callers spread this
+	 * coordinator's JSON contract uses: callers spread this
 	 * result into JSON responses, and a JSON number loses precision above 2^53.
 	 */
 	mmrEnd: string;
@@ -206,14 +207,14 @@ async function submitCertificate(
 ): Promise<DelegateSealingResult> {
 	const info = parseDelegationCertificate(certificate);
 	// The coordinator's JSON contract carries range bounds as canonical
-	// decimal strings (plan-2611-01 D1); a JSON number gets 400.
+	// decimal strings; a JSON number gets 400.
 	const submitRes = await fetchImpl(`${params.coordinatorUrl}/api/delegations/certificate`, {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify({
 			logId: params.logId,
-			mmrStart: mmrStart.toString(10),
-			mmrEnd: mmrEnd.toString(10),
+			mmrStart: formatDecimalUint64(mmrStart),
+			mmrEnd: formatDecimalUint64(mmrEnd),
 			delegatedPublicKey: standing.delegatedPublicKey,
 			certificate: bytesToB64(certificate),
 			issuedAt: info.issuedAt,
@@ -235,7 +236,7 @@ async function submitCertificate(
 	return {
 		sealerId: standing.sealerId!,
 		epoch: standing.epoch!,
-		mmrEnd: mmrEnd.toString(10),
+		mmrEnd: formatDecimalUint64(mmrEnd),
 		expiresAt: info.expiresAt
 	};
 }

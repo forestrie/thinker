@@ -17,6 +17,7 @@ import {
 import {
 	assembleWebauthnDelegationAlgData,
 	normalizeEs256SignatureLowS,
+	parseDecimalUint64,
 	verifyOnchainDelegationSignatureWebauthn,
 	type WebauthnAssertionResult
 } from '@forestrie/delegation-cose';
@@ -203,7 +204,7 @@ describe('delegateSealingWebauthn (4.2)', () => {
 		const body = good.submitted[0]!;
 		expect(typeof body.onchainAuthenticatorData).toBe('string');
 		expect(typeof body.onchainClientDataJSON).toBe('string');
-		// Range bounds as canonical decimal strings (plan-2611-01 D1).
+		// Range bounds as canonical decimal strings.
 		expect(body.mmrStart).toBe('0');
 		expect(body.mmrEnd).toBe(String(Number.MAX_SAFE_INTEGER));
 
@@ -227,8 +228,8 @@ describe('delegateSealingWebauthn (4.2)', () => {
 			await verifyOnchainDelegationSignatureWebauthn(
 				{
 					logIdHex: LOG_ID.replaceAll('-', ''),
-					mmrStart: BigInt(String(body.mmrStart)),
-					mmrEnd: BigInt(String(body.mmrEnd)),
+					mmrStart: parseDecimalUint64(body.mmrStart),
+					mmrEnd: parseDecimalUint64(body.mmrEnd),
 					delegatedKeyX: good.delegated.x,
 					delegatedKeyY: good.delegated.y
 				},

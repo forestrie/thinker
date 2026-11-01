@@ -39,6 +39,7 @@ import {
 	decodeWebauthnDelegationAlgData,
 	buildOnchainDelegationToBeSignedWebauthn,
 	verifyOnchainDelegationSignatureWebauthn,
+	parseDecimalUint64,
 	parseDelegationCertificate
 } from '@forestrie/delegation-cose';
 import {
@@ -298,9 +299,9 @@ export async function captureGolden(identity: CaptureIdentity): Promise<GoldenCa
 	const decoded = decodeWebauthnDelegationAlgData(algData);
 	const onchainInput = {
 		logIdHex: GOLDEN_LOG_ID_HEX,
-		// Canonical decimal strings on the coordinator wire (plan-2611-01 D1).
-		mmrStart: BigInt(String(body.mmrStart)),
-		mmrEnd: BigInt(String(body.mmrEnd)),
+		// Canonical decimal strings on the coordinator wire.
+		mmrStart: parseDecimalUint64(body.mmrStart, 'mmrStart'),
+		mmrEnd: parseDecimalUint64(body.mmrEnd, 'mmrEnd'),
 		delegatedKeyX: DELEGATED_X,
 		delegatedKeyY: DELEGATED_Y
 	};

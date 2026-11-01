@@ -1,5 +1,5 @@
 /**
- * Delegation MMR range as uint64 (FOR-613, plan-2611-01 D1): the certificate
+ * Delegation MMR range as uint64 (FOR-613): the certificate
  * carries the range as CBOR major type 0 (`bigint` in delegation-cose ≥0.5),
  * and the coordinator's JSON contract carries every range bound as a
  * canonical decimal string — a JSON number loses precision above 2^53.
@@ -14,6 +14,7 @@ import {
 	encodeSigStructure
 } from '@forestrie/encoding';
 import {
+	parseDecimalUint64,
 	parseDelegationCertificate,
 	verifyOnchainDelegationSignatureEs256
 } from '@forestrie/delegation-cose';
@@ -74,8 +75,8 @@ async function buildVoucher(
 
 /**
  * Mock coordinator. The pending-delegation response carries, beside the
- * standing entry, a range-bearing pending entry in the D1 shape (decimal
- * strings) that `delegateSealing` must skip.
+ * standing entry, a range-bearing pending entry in the coordinator's
+ * shape (decimal strings) that `delegateSealing` must skip.
  */
 async function fixture() {
 	const root = await generateKeyPair();
@@ -136,7 +137,7 @@ describe('delegateSealing — uint64 MMR range (FOR-613)', () => {
 
 		expect(f.submitted.length).toBe(1);
 		const body = f.submitted[0]!;
-		// D1: canonical decimal strings on the wire, never JSON numbers.
+		// Canonical decimal strings on the wire, never JSON numbers.
 		expect(body.mmrStart).toBe('0');
 		expect(body.mmrEnd).toBe('9007199254740999');
 		expect(String(body.mmrEnd)).toMatch(CANONICAL_DECIMAL);
@@ -152,8 +153,8 @@ describe('delegateSealing — uint64 MMR range (FOR-613)', () => {
 			await verifyOnchainDelegationSignatureEs256(
 				{
 					logIdHex: LOG_ID_HEX,
-					mmrStart: BigInt(String(body.mmrStart)),
-					mmrEnd: BigInt(String(body.mmrEnd)),
+					mmrStart: parseDecimalUint64(body.mmrStart),
+					mmrEnd: parseDecimalUint64(body.mmrEnd),
 					delegatedKeyX: f.delegated.x,
 					delegatedKeyY: f.delegated.y
 				},
