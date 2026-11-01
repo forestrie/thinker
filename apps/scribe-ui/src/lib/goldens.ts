@@ -55,8 +55,11 @@ import { bytesToB64, bytesToHex } from './utils.ts';
 /** Same scope family as delegation-cose testdata/onchain-delegation-vectors.json. */
 const GOLDEN_LOG_UUID = '10111213-1415-1617-1819-1a1b1c1d1e1f';
 const GOLDEN_LOG_ID_HEX = '101112131415161718191a1b1c1d1e1f';
-/** 1 << 40 — the ceremony's mmrStart is fixed at 0 by delegateSealingWebauthn. */
-const GOLDEN_MMR_END = 1_099_511_627_776;
+/**
+ * 1 << 40 — the ceremony's mmrStart is fixed at 0 by delegateSealingWebauthn.
+ * A uint64 (FOR-613); the value, and so every golden byte, is unchanged.
+ */
+const GOLDEN_MMR_END = 1_099_511_627_776n;
 const DELEGATED_X = Uint8Array.from({ length: 32 }, (_, i) => 0xa0 + i);
 const DELEGATED_Y = Uint8Array.from({ length: 32 }, (_, i) => 0xc0 + i);
 /** Fixed P-256 registrar TEST key (scalar d1f1…f1) — never a production key. */
@@ -295,8 +298,9 @@ export async function captureGolden(identity: CaptureIdentity): Promise<GoldenCa
 	const decoded = decodeWebauthnDelegationAlgData(algData);
 	const onchainInput = {
 		logIdHex: GOLDEN_LOG_ID_HEX,
-		mmrStart: Number(body.mmrStart),
-		mmrEnd: Number(body.mmrEnd),
+		// Canonical decimal strings on the coordinator wire (plan-2611-01 D1).
+		mmrStart: BigInt(String(body.mmrStart)),
+		mmrEnd: BigInt(String(body.mmrEnd)),
 		delegatedKeyX: DELEGATED_X,
 		delegatedKeyY: DELEGATED_Y
 	};

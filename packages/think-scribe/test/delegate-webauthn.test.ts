@@ -203,6 +203,9 @@ describe('delegateSealingWebauthn (4.2)', () => {
 		const body = good.submitted[0]!;
 		expect(typeof body.onchainAuthenticatorData).toBe('string');
 		expect(typeof body.onchainClientDataJSON).toBe('string');
+		// Range bounds as canonical decimal strings (plan-2611-01 D1).
+		expect(body.mmrStart).toBe('0');
+		expect(body.mmrEnd).toBe(String(Number.MAX_SAFE_INTEGER));
 
 		// The certificate verifies under the passkey root via the shared
 		// -65800 envelope branch (challenge binding included).
@@ -224,8 +227,8 @@ describe('delegateSealingWebauthn (4.2)', () => {
 			await verifyOnchainDelegationSignatureWebauthn(
 				{
 					logIdHex: LOG_ID.replaceAll('-', ''),
-					mmrStart: Number(body.mmrStart),
-					mmrEnd: Number(body.mmrEnd),
+					mmrStart: BigInt(String(body.mmrStart)),
+					mmrEnd: BigInt(String(body.mmrEnd)),
 					delegatedKeyX: good.delegated.x,
 					delegatedKeyY: good.delegated.y
 				},
